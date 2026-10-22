@@ -12,7 +12,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -30,7 +29,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             HelldyeTheme {
-                val activity = LocalContext.current as MainActivity
+                val activity = this@MainActivity
                 var roleHeld by remember { mutableStateOf(AssistantRole.isHeld(activity)) }
                 val roleAvailable = remember { AssistantRole.isAvailable(activity) }
                 val lifecycleOwner = LocalLifecycleOwner.current
