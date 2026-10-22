@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:recognitionService=""
+    android:sessionService="dev.scdeal.helldye.voice.HelldyeSessionService"
+    android:settingsActivity="dev.scdeal.helldye.MainActivity"
+    android:supportsAssist="true"
+    android:supportsLaunchVoiceAssistFromKeyguard="true"
+    android:supportsLocalInteraction="true"
+    android:usesAssistStructureScreenContent="true"
+    tools:targetApi="37" />

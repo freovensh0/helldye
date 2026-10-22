@@ -1,0 +1,836 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HELLDYE — UI direction</title>
+<style>
+  @font-face {
+    font-family: 'Instrument Sans';
+    src: url('fonts/instrument-sans.ttf') format('truetype');
+    font-weight: 400 700;
+    font-display: block;
+  }
+  @font-face {
+    font-family: 'JetBrains Mono';
+    src: url('fonts/jetbrains-mono.ttf') format('truetype');
+    font-weight: 100 800;
+    font-display: block;
+  }
+  @font-face {
+    font-family: 'Space Grotesk';
+    src: url('fonts/space-grotesk.ttf') format('truetype');
+    font-weight: 300 700;
+    font-display: block;
+  }
+
+  :root {
+    --black: #000000;
+    --page: #050505;
+    --surface: #070707;
+    --raised: #0D0D0D;
+    --line-soft: #1A1A1A;
+    --line: #2A2A2A;
+    --line-strong: #5A5A5A;
+    --muted: #8A8A8A;
+    --secondary: #A3A3A3;
+    --text: #F2F2F2;
+    --white: #FFFFFF;
+    --signal: #FF4D4D;
+    --signal-line: #C8102E;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--page); }
+  body {
+    width: 1440px;
+    min-height: 1080px;
+    color: var(--text);
+    font-family: 'Instrument Sans', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: geometricPrecision;
+  }
+
+  .board {
+    width: 1440px;
+    height: 1080px;
+    padding: 34px 64px 28px;
+    background: var(--page);
+    overflow: hidden;
+  }
+
+  .top {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    padding-bottom: 22px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+
+  .brandmark {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    line-height: 1;
+    position: relative;
+    padding-bottom: 9px;
+  }
+  .brandmark::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    width: 26px;
+    height: 1px;
+    background: var(--signal-line);
+  }
+  .kicker {
+    margin-top: 9px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    font-weight: 400;
+    letter-spacing: 0.12em;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+  .meta {
+    text-align: right;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    line-height: 1.8;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+  .meta b { color: var(--text); font-weight: 500; }
+
+  .phones {
+    display: grid;
+    grid-template-columns: repeat(3, 380px);
+    gap: 32px;
+    justify-content: center;
+    margin-top: 24px;
+  }
+
+  .phone-label {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .phone-label b {
+    color: var(--text);
+    font-weight: 500;
+  }
+  .phone-label .dash { color: var(--line-strong); }
+
+  .phone {
+    width: 380px;
+    height: 820px;
+    border: 1px solid var(--line);
+    border-radius: 2px;
+    background: var(--black);
+    overflow: hidden;
+    position: relative;
+  }
+  .screen {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    background: var(--black);
+  }
+
+  .statusbar {
+    height: 26px;
+    flex: 0 0 26px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 16px;
+    border-bottom: 1px solid #111111;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 7px;
+    letter-spacing: 0.06em;
+    color: var(--secondary);
+  }
+  .statusbar .right { display: flex; align-items: center; gap: 5px; }
+  .signal-bars { display: flex; align-items: flex-end; gap: 1px; height: 6px; }
+  .signal-bars i { display: block; width: 2px; background: var(--secondary); }
+  .signal-bars i:nth-child(1) { height: 2px; }
+  .signal-bars i:nth-child(2) { height: 3px; }
+  .signal-bars i:nth-child(3) { height: 5px; }
+  .signal-bars i:nth-child(4) { height: 6px; }
+  .battery {
+    width: 13px;
+    height: 6px;
+    border: 1px solid var(--secondary);
+    position: relative;
+  }
+  .battery::after {
+    content: '';
+    position: absolute;
+    right: -3px;
+    top: 1px;
+    width: 1px;
+    height: 2px;
+    background: var(--secondary);
+  }
+  .battery::before {
+    content: '';
+    position: absolute;
+    left: 1px;
+    top: 1px;
+    bottom: 1px;
+    width: 8px;
+    background: var(--secondary);
+  }
+
+  .appbar {
+    height: 46px;
+    flex: 0 0 46px;
+    padding: 0 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .wordmark {
+    position: relative;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    color: var(--text);
+    padding-bottom: 7px;
+  }
+  .wordmark::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    width: 18px;
+    height: 1px;
+    background: var(--signal-line);
+  }
+  .back {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    color: var(--text);
+    text-transform: uppercase;
+  }
+  .chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 7px;
+    border: 1px solid var(--line-strong);
+    border-radius: 2px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 7px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text);
+  }
+  .chip .dot { width: 4px; height: 4px; background: var(--text); border-radius: 50%; }
+  .chip.off { color: var(--muted); }
+  .chip.off .dot { background: var(--muted); }
+  .chip.danger { color: var(--signal); border-color: var(--signal-line); }
+  .chip.danger .dot { background: var(--signal); }
+
+  .icon {
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.5;
+    stroke-linecap: square;
+    stroke-linejoin: miter;
+    display: block;
+  }
+  .icon.round { stroke-linecap: round; stroke-linejoin: round; }
+
+  .assistant .content {
+    flex: 1;
+    min-height: 0;
+    padding: 28px 20px 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .status {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 38px;
+    line-height: 1;
+    font-weight: 600;
+    letter-spacing: -0.8px;
+    color: var(--text);
+  }
+  .status-sub {
+    margin-top: 9px;
+    font-size: 12px;
+    line-height: 18px;
+    color: var(--secondary);
+  }
+  .wave {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    height: 44px;
+    margin: 22px 0 24px;
+  }
+  .wave i {
+    display: block;
+    width: 2px;
+    background: var(--line-strong);
+    flex: 0 0 2px;
+  }
+  .wave i.on { background: var(--text); }
+
+  .label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    font-weight: 500;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  .transcript {
+    font-size: 16px;
+    line-height: 22px;
+    color: var(--text);
+    letter-spacing: -0.1px;
+  }
+  .context {
+    margin-top: 18px;
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-radius: 0;
+  }
+  .context .label { margin-bottom: 5px; }
+  .context .excerpt {
+    font-size: 11px;
+    line-height: 16px;
+    color: var(--secondary);
+  }
+  .context .meta {
+    margin-top: 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+  .answer { margin-top: 18px; }
+  .answer p {
+    margin: 0;
+    font-size: 13px;
+    line-height: 20px;
+    color: var(--text);
+  }
+  .answer p + p {
+    margin-top: 6px;
+    color: var(--secondary);
+  }
+  .session {
+    margin-top: auto;
+    padding: 12px 0 16px;
+    border-top: 1px solid var(--line-soft);
+    display: flex;
+    justify-content: space-between;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 7px;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+
+  .bottombar {
+    flex: 0 0 64px;
+    height: 64px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 0 20px;
+    border-top: 1px solid var(--line-soft);
+  }
+  .mic {
+    width: 44px;
+    height: 44px;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--line-strong);
+    border-radius: 2px;
+    color: var(--text);
+    background: transparent;
+  }
+  .mic .icon { width: 18px; height: 18px; }
+  .ghost {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--secondary);
+  }
+  .ghost .icon { width: 14px; height: 14px; }
+
+  .onboarding .content {
+    flex: 1;
+    min-height: 0;
+    padding: 26px 20px 18px;
+    display: flex;
+    flex-direction: column;
+  }
+  .onboarding .eyebrow {
+    margin-top: 26px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    letter-spacing: 0.12em;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+  .onboarding h1 {
+    margin: 8px 0 10px;
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 30px;
+    line-height: 33px;
+    font-weight: 600;
+    letter-spacing: -0.5px;
+  }
+  .onboarding .lede {
+    margin: 0;
+    font-size: 12px;
+    line-height: 18px;
+    color: var(--secondary);
+  }
+  .rows {
+    margin-top: 24px;
+    border-top: 1px solid var(--line);
+  }
+  .row {
+    min-height: 54px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .row-main { flex: 1; min-width: 0; }
+  .row .name { font-size: 12px; line-height: 16px; color: var(--text); }
+  .row .state {
+    margin-top: 3px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+  .row .state.ok { color: var(--text); }
+  .row .action {
+    flex: 0 0 auto;
+    padding: 6px 7px;
+    border: 1px solid var(--line-strong);
+    border-radius: 2px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 7px;
+    letter-spacing: 0.08em;
+    color: var(--text);
+    text-transform: uppercase;
+  }
+  .row .action.danger { color: var(--signal); border-color: var(--signal-line); }
+  .warning {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 16px;
+    padding: 9px 10px;
+    border: 1px solid var(--signal-line);
+    border-radius: 2px;
+  }
+  .warning .icon {
+    width: 14px;
+    height: 14px;
+    flex: 0 0 14px;
+    color: var(--signal);
+  }
+  .warning-copy {
+    flex: 1;
+    font-size: 10px;
+    line-height: 14px;
+    color: var(--text);
+  }
+  .warning-copy b { font-weight: 500; }
+  .warning-action {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 7px;
+    letter-spacing: 0.08em;
+    color: var(--signal);
+    text-transform: uppercase;
+  }
+  .actions {
+    margin-top: auto;
+    padding-top: 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .btn {
+    height: 44px;
+    display: grid;
+    place-items: center;
+    border-radius: 2px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .btn.primary { background: var(--text); color: var(--black); }
+  .btn.secondary { border: 1px solid var(--line-strong); color: var(--text); }
+  .footnote {
+    margin: 12px 0 0;
+    text-align: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 7px;
+    line-height: 12px;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+  }
+
+  .settings .content {
+    flex: 1;
+    min-height: 0;
+    padding: 18px 20px 0;
+    overflow: hidden;
+  }
+  .settings h1 {
+    margin: 8px 0 16px;
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 26px;
+    line-height: 30px;
+    font-weight: 600;
+    letter-spacing: -0.4px;
+  }
+  .section {
+    margin: 17px 0 5px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    letter-spacing: 0.12em;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+  .srow {
+    min-height: 46px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-top: 1px solid var(--line-soft);
+  }
+  .srow.last { border-bottom: 1px solid var(--line-soft); }
+  .sname { flex: 1; font-size: 12px; color: var(--text); }
+  .sval {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    letter-spacing: 0.06em;
+    color: var(--secondary);
+    text-transform: uppercase;
+  }
+  .saction {
+    padding: 5px 6px;
+    border: 1px solid var(--line-strong);
+    border-radius: 2px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 7px;
+    letter-spacing: 0.08em;
+    color: var(--text);
+    text-transform: uppercase;
+  }
+  .saction.danger { color: var(--signal); border-color: var(--signal-line); }
+  .toggle {
+    width: 34px;
+    height: 18px;
+    border: 1px solid var(--line-strong);
+    border-radius: 2px;
+    position: relative;
+    flex: 0 0 34px;
+  }
+  .toggle::after {
+    content: '';
+    position: absolute;
+    left: 2px;
+    top: 2px;
+    width: 12px;
+    height: 12px;
+    background: var(--muted);
+    border-radius: 1px;
+  }
+  .toggle.on { background: var(--text); border-color: var(--text); }
+  .toggle.on::after { left: auto; right: 2px; background: var(--black); }
+
+  .footer {
+    margin-top: 18px;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+  .footer .right { color: var(--line-strong); }
+</style>
+</head>
+<body>
+<div class="board">
+  <header class="top">
+    <div>
+      <div class="brandmark">HELLDYE</div>
+      <div class="kicker">UI direction / Compose / research mock</div>
+    </div>
+    <div class="meta">
+      <b>BLACK · HAIRLINE · MONO</b><br>
+      one signal red · 0–4dp corners<br>
+      90–160ms state-only motion
+    </div>
+  </header>
+
+  <main class="phones">
+    <section class="phone-wrap">
+      <div class="phone-label"><span><b>01</b> <span class="dash">/</span> ONBOARDING</span><span>DEFAULT ASSISTANT</span></div>
+      <div class="phone">
+        <div class="screen onboarding">
+          <div class="statusbar">
+            <span>09:41</span>
+            <span class="right">
+              <span class="signal-bars"><i></i><i></i><i></i><i></i></span>
+              <span>LTE</span>
+              <span class="battery"></span>
+            </span>
+          </div>
+          <div class="appbar">
+            <div class="wordmark">HELLDYE</div>
+            <div class="chip off"><span class="dot"></span>NOT DEFAULT</div>
+          </div>
+          <div class="content">
+            <div class="eyebrow">01 / SETUP</div>
+            <h1>Your assistant.<br>On your terms.</h1>
+            <p class="lede">Screen context is read only when you ask. Nothing leaves the device unless you choose it.</p>
+
+            <div class="rows">
+              <div class="row">
+                <div class="row-main">
+                  <div class="name">Default assistant</div>
+                  <div class="state">NOT SET</div>
+                </div>
+                <div class="action">SET</div>
+              </div>
+              <div class="row">
+                <div class="row-main">
+                  <div class="name">Screen context</div>
+                  <div class="state">OFF</div>
+                </div>
+                <div class="action">OPEN</div>
+              </div>
+              <div class="row">
+                <div class="row-main">
+                  <div class="name">Microphone</div>
+                  <div class="state">MISSING</div>
+                </div>
+                <div class="action">GRANT</div>
+              </div>
+            </div>
+
+            <div class="warning">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 3L2.5 20h19L12 3z"></path>
+                <path d="M12 9v5M12 17h.01"></path>
+              </svg>
+              <div class="warning-copy"><b>Screen access is off.</b> Enable it in system settings.</div>
+              <div class="warning-action">OPEN</div>
+            </div>
+
+            <div class="actions">
+              <div class="btn primary">SET AS DEFAULT ASSISTANT</div>
+              <div class="btn secondary">OPEN ASSISTANT SETTINGS</div>
+              <p class="footnote">Works with the system assist gesture.<br>Power-button behavior depends on the device.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="phone-wrap">
+      <div class="phone-label"><span><b>02</b> <span class="dash">/</span> ASSISTANT</span><span>SCREEN CONTEXT ON</span></div>
+      <div class="phone">
+        <div class="screen assistant">
+          <div class="statusbar">
+            <span>09:41</span>
+            <span class="right">
+              <span class="signal-bars"><i></i><i></i><i></i><i></i></span>
+              <span>LTE</span>
+              <span class="battery"></span>
+            </span>
+          </div>
+          <div class="appbar">
+            <div class="wordmark">HELLDYE</div>
+            <div class="chip"><span class="dot"></span>SCREEN ON</div>
+          </div>
+          <div class="content">
+            <div class="status">LISTENING</div>
+            <div class="status-sub">Speak, or type. The answer stays on this screen.</div>
+
+            <div class="wave" aria-hidden="true">
+              <i style="height:7px"></i><i style="height:12px"></i><i style="height:18px" class="on"></i><i style="height:10px"></i>
+              <i style="height:24px" class="on"></i><i style="height:16px"></i><i style="height:9px"></i><i style="height:26px" class="on"></i>
+              <i style="height:34px" class="on"></i><i style="height:18px"></i><i style="height:8px"></i><i style="height:22px" class="on"></i>
+              <i style="height:30px" class="on"></i><i style="height:14px"></i><i style="height:9px"></i><i style="height:20px" class="on"></i>
+              <i style="height:38px" class="on"></i><i style="height:22px"></i><i style="height:10px"></i><i style="height:15px"></i>
+              <i style="height:28px" class="on"></i><i style="height:36px" class="on"></i><i style="height:18px"></i><i style="height:8px"></i>
+              <i style="height:14px"></i><i style="height:24px" class="on"></i><i style="height:32px" class="on"></i><i style="height:16px"></i>
+              <i style="height:10px"></i><i style="height:6px"></i>
+            </div>
+
+            <div class="label">TRANSCRIPT</div>
+            <div class="transcript">What changed in my battery settings?</div>
+
+            <div class="context">
+              <div class="label">SCREEN CONTEXT</div>
+              <div class="excerpt">Settings / Battery / Battery usage — the screen shows the last 24 hours and a list of apps.</div>
+              <div class="meta">2 LINES · 148 CHARS · TEXT ONLY</div>
+            </div>
+
+            <div class="answer">
+              <div class="label">ANSWER</div>
+              <p>Battery usage is down 8% since this morning. The largest drain is the display, followed by the assistant service.</p>
+              <p>No screenshot was attached. Screen text was read locally and cleared when the session closed.</p>
+            </div>
+
+            <div class="session">
+              <span>LOCAL SESSION</span>
+              <span>TEXT ONLY · NO SCREENSHOT</span>
+            </div>
+          </div>
+          <div class="bottombar">
+            <div class="mic" aria-label="Microphone">
+              <svg class="icon round" viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="9" y="3" width="6" height="11" rx="3"></rect>
+                <path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8"></path>
+              </svg>
+            </div>
+            <div class="ghost">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="3" y="6" width="18" height="12" rx="1"></rect>
+                <path d="M6 10h1M10 10h1M14 10h1M18 10h.01M6 14h12"></path>
+              </svg>
+              TYPE
+            </div>
+            <div class="ghost">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M6 6l12 12M18 6L6 18"></path>
+              </svg>
+              CLOSE
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="phone-wrap">
+      <div class="phone-label"><span><b>03</b> <span class="dash">/</span> SETTINGS</span><span>SYSTEM-CONTROLLED ROWS</span></div>
+      <div class="phone">
+        <div class="screen settings">
+          <div class="statusbar">
+            <span>09:41</span>
+            <span class="right">
+              <span class="signal-bars"><i></i><i></i><i></i><i></i></span>
+              <span>LTE</span>
+              <span class="battery"></span>
+            </span>
+          </div>
+          <div class="appbar">
+            <div class="back">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18l-6-6 6-6"></path></svg>
+              SETTINGS
+            </div>
+            <div class="chip off"><span class="dot"></span>LOCAL</div>
+          </div>
+          <div class="content">
+            <h1>Settings</h1>
+
+            <div class="section">ASSISTANT</div>
+            <div class="srow">
+              <div class="sname">Default assistant</div>
+              <div class="sval">NOT SET</div>
+              <div class="saction">CHANGE</div>
+            </div>
+            <div class="srow last">
+              <div class="sname">Open on assist gesture</div>
+              <div class="toggle on"></div>
+            </div>
+
+            <div class="section">SCREEN CONTEXT</div>
+            <div class="srow">
+              <div class="sname">Screen access</div>
+              <div class="sval">OFF</div>
+              <div class="saction">OPEN</div>
+            </div>
+            <div class="srow last">
+              <div class="sname">Screenshot included</div>
+              <div class="sval">—</div>
+            </div>
+
+            <div class="section">VOICE</div>
+            <div class="srow">
+              <div class="sname">Microphone</div>
+              <div class="sval">GRANTED</div>
+            </div>
+            <div class="srow last">
+              <div class="sname">Language</div>
+              <div class="sval">EN</div>
+            </div>
+
+            <div class="section">PRIVACY</div>
+            <div class="srow">
+              <div class="sname">History</div>
+              <div class="toggle"></div>
+            </div>
+            <div class="srow last">
+              <div class="sname">Clear local data</div>
+              <div class="saction danger">CLEAR</div>
+            </div>
+
+            <div class="section">ABOUT</div>
+            <div class="srow">
+              <div class="sname">Version</div>
+              <div class="sval">0.1.0</div>
+            </div>
+            <div class="srow last">
+              <div class="sname">Licenses</div>
+              <div class="saction">OPEN</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>NO SHADOWS · NO GRADIENTS · NO PILLS · NO DOT-MATRIX TEXT</span>
+    <span class="right">FIRST FRAME IS FINAL</span>
+  </footer>
+</div>
+</body>
+</html>

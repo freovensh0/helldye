@@ -1,0 +1,13 @@
+# HELLDYE
+
+The Android Gradle scaffold in this repository is derived from the Android Architecture Templates
+base branch, Copyright (C) 2022 The Android Open Source Project, licensed under the Apache License
+2.0 (see `LICENSE`).
+
+Bundled font families:
+
+- Instrument Sans, Copyright 2022 The Instrument Sans Project Authors.
+- JetBrains Mono, Copyright 2020 The JetBrains Mono Project Authors.
+- Space Grotesk, Copyright 2018 The Space Grotesk Project Authors.
+
+Each font is licensed under the SIL Open Font License 1.1. Full license texts are in `licenses/`.
