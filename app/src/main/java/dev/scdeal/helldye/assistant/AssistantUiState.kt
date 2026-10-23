@@ -25,10 +25,6 @@ sealed interface Attachment {
     ) : Attachment {
         override val label: String = name
     }
-
-    data class Screen(val content: String) : Attachment {
-        override val label: String = "SCREEN"
-    }
 }
 
 data class AssistantUiState(

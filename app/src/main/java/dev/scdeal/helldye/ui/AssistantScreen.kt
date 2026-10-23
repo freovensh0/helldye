@@ -1,6 +1,7 @@
 package dev.scdeal.helldye.ui
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Base64
@@ -42,7 +43,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -79,18 +79,19 @@ import java.io.InputStream
 
 @Composable
 fun AssistantScreen(
-    screenText: String?,
+    overlay: Boolean,
+    screenshot: Bitmap?,
     assistReceived: Boolean,
     state: AssistantUiState,
-    onSubmit: (String, String?) -> Unit,
+    onSubmit: (String) -> Unit,
     onAddAttachment: (Attachment) -> Unit,
     onRemoveAttachment: (Int) -> Unit,
     onNotice: (String) -> Unit,
     onDismissNotice: () -> Unit,
     onOpenSettings: () -> Unit,
+    onExpand: (() -> Unit)?,
     onClose: () -> Unit,
 ) {
-    var expanded by rememberSaveable { mutableStateOf(false) }
     var input by rememberSaveable { mutableStateOf("") }
     var attachmentMenu by rememberSaveable { mutableStateOf(false) }
     val listState = rememberLazyListState()
@@ -100,7 +101,7 @@ fun AssistantScreen(
 
     fun send() {
         if (input.isBlank() && state.attachments.isEmpty()) return
-        onSubmit(input, screenText)
+        onSubmit(input)
         input = ""
         attachmentMenu = false
         keyboard?.hide()
@@ -125,9 +126,7 @@ fun AssistantScreen(
         }
     }
 
-    BackHandler {
-        if (expanded) expanded = false else onClose()
-    }
+    BackHandler { onClose() }
 
     LaunchedEffect(state.messages.size) {
         if (state.messages.isNotEmpty()) listState.scrollToItem(state.messages.lastIndex)
@@ -136,18 +135,25 @@ fun AssistantScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(if (expanded) HelldyeColors.Black else Color.Transparent),
+            .background(if (overlay) Color.Transparent else HelldyeColors.Black),
     ) {
+        if (overlay) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(HelldyeColors.Black.copy(alpha = 0.45f)),
+            )
+        }
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .windowInsetsPadding(WindowInsets.safeDrawing),
         ) {
             AssistantTopBar(
-                contextEnabled = screenText != null,
+                overlay = overlay,
+                screenshot = screenshot,
                 assistReceived = assistReceived,
-                expanded = expanded,
-                onToggleExpanded = { expanded = !expanded },
+                onExpand = onExpand,
                 onClose = onClose,
             )
 
@@ -164,11 +170,7 @@ fun AssistantScreen(
             ) {
                 if (state.messages.isEmpty()) {
                     item {
-                        EmptyState(
-                            hasScreen = screenText != null,
-                            hasAssist = assistReceived,
-                            expanded = expanded,
-                        )
+                        EmptyState()
                     }
                 }
                 items(state.messages, key = { it.id }) { message ->
@@ -189,7 +191,7 @@ fun AssistantScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(if (expanded) HelldyeColors.Black else HelldyeColors.Black.copy(alpha = 0.62f))
+                    .background(HelldyeColors.Black)
                     .padding(horizontal = HelldyeDimens.Md, vertical = HelldyeDimens.Sm),
             ) {
                 if (state.error != null || state.notice != null) {
@@ -222,18 +224,30 @@ fun AssistantScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .background(HelldyeColors.Surface)
+                            .border(1.dp, HelldyeColors.LineSoft, RoundedCornerShape(2.dp))
+                            .padding(HelldyeDimens.Xs)
                             .padding(bottom = HelldyeDimens.Sm),
                         horizontalArrangement = Arrangement.spacedBy(HelldyeDimens.Sm),
                     ) {
                         AttachmentAction("PHOTO") { attachmentMenu = false; photoPicker.launch("image/*") }
-                        AttachmentAction("SCREEN") {
-                            attachmentMenu = false
-                            if (screenText.isNullOrBlank()) {
-                                onNotice("No screen text is available in this request.")
-                            } else if (state.attachments.any { it is Attachment.Screen }) {
-                                onNotice("Screen context is already attached.")
-                            } else {
-                                onAddAttachment(Attachment.Screen(screenText))
+                        if (overlay) {
+                            AttachmentAction("SCREEN") {
+                                attachmentMenu = false
+                                val shot = screenshot
+                                if (shot == null) {
+                                    onNotice("No screenshot is available for this request.")
+                                } else if (state.attachments.any { it is Attachment.Photo && it.name == "SCREEN" }) {
+                                    onNotice("The screen is already attached.")
+                                } else {
+                                    scope.launch {
+                                        runCatching { readScreenshot(shot) }
+                                            .onSuccess { onAddAttachment(it) }
+                                            .onFailure {
+                                                onNotice(it.message ?: "Could not read the screenshot.")
+                                            }
+                                    }
+                                }
                             }
                         }
                         AttachmentAction("FILE") { attachmentMenu = false; filePicker.launch("*/*") }
@@ -255,14 +269,15 @@ fun AssistantScreen(
 
 @Composable
 private fun AssistantTopBar(
-    contextEnabled: Boolean,
+    overlay: Boolean,
+    screenshot: Bitmap?,
     assistReceived: Boolean,
-    expanded: Boolean,
-    onToggleExpanded: () -> Unit,
+    onExpand: (() -> Unit)?,
     onClose: () -> Unit,
 ) {
     val label = when {
-        contextEnabled -> "SCREEN ON"
+        !overlay -> "SESSION"
+        screenshot != null -> "SCREEN READY"
         assistReceived -> "SCREEN EMPTY"
         else -> "NO ASSIST"
     }
@@ -277,18 +292,20 @@ private fun AssistantTopBar(
         Spacer(Modifier.weight(1f))
         StatusChip(
             label = label,
-            tone = if (contextEnabled) StatusTone.Active else StatusTone.Neutral,
+            tone = if (screenshot != null || !overlay) StatusTone.Active else StatusTone.Neutral,
         )
-        IconButton(
-            onClick = onToggleExpanded,
-            modifier = Modifier.size(HelldyeDimens.TouchTarget),
-        ) {
-            Icon(
-                painter = painterResource(if (expanded) R.drawable.ic_collapse else R.drawable.ic_expand),
-                contentDescription = if (expanded) "Collapse assistant" else "Open full session",
-                tint = HelldyeColors.TextSecondary,
-                modifier = Modifier.size(20.dp),
-            )
+        if (onExpand != null) {
+            IconButton(
+                onClick = onExpand,
+                modifier = Modifier.size(HelldyeDimens.TouchTarget),
+            ) {
+                Icon(
+                    painter = painterResource(R.drawable.ic_expand),
+                    contentDescription = "Open session in HELLDYE",
+                    tint = HelldyeColors.TextSecondary,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
         }
         IconButton(
             onClick = onClose,
@@ -305,15 +322,13 @@ private fun AssistantTopBar(
 }
 
 @Composable
-private fun EmptyState(hasScreen: Boolean, hasAssist: Boolean, expanded: Boolean) {
+private fun EmptyState() {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = if (expanded) 64.dp else 36.dp)
-            .background(
-                color = if (expanded) Color.Transparent else HelldyeColors.Black.copy(alpha = 0.42f),
-                shape = RoundedCornerShape(2.dp),
-            )
+            .padding(top = 36.dp)
+            .background(HelldyeColors.Surface, RoundedCornerShape(2.dp))
+            .border(1.dp, HelldyeColors.LineSoft, RoundedCornerShape(2.dp))
             .padding(HelldyeDimens.Md),
     ) {
         SectionLabel("ASSISTANT")
@@ -325,11 +340,7 @@ private fun EmptyState(hasScreen: Boolean, hasAssist: Boolean, expanded: Boolean
         )
         Spacer(Modifier.height(HelldyeDimens.Sm))
         Text(
-            text = when {
-                hasScreen -> "Screen text is attached to your next request."
-                hasAssist -> "Assist is open, but the screen did not provide text."
-                else -> "Open HELLDYE from the assist gesture to attach screen text."
-            },
+            text = "Attach a photo, the current screen, or a file when you need context.",
             style = MaterialTheme.typography.bodyMedium,
             color = HelldyeColors.TextSecondary,
         )
@@ -347,7 +358,7 @@ private fun MessageRow(message: ChatMessage) {
         Text(
             text = label,
             style = MaterialTheme.typography.labelSmall,
-            color = if (message.role == ChatRole.Tool) HelldyeColors.TextMuted else HelldyeColors.TextMuted,
+            color = HelldyeColors.TextMuted,
         )
         Spacer(Modifier.height(2.dp))
         Box(
@@ -355,12 +366,13 @@ private fun MessageRow(message: ChatMessage) {
                 .fillMaxWidth()
                 .background(
                     color = if (message.role == ChatRole.Assistant) {
-                        HelldyeColors.Black.copy(alpha = 0.30f)
+                        HelldyeColors.Surface
                     } else {
-                        HelldyeColors.Black.copy(alpha = 0.55f)
+                        HelldyeColors.SurfaceRaised
                     },
                     shape = RoundedCornerShape(2.dp),
                 )
+                .border(1.dp, HelldyeColors.LineSoft, RoundedCornerShape(2.dp))
                 .padding(HelldyeDimens.Md),
         ) {
             Text(
@@ -381,6 +393,7 @@ private fun AttachmentChip(label: String, onRemove: () -> Unit) {
     Row(
         modifier = Modifier
             .heightIn(min = HelldyeDimens.TouchTarget)
+            .background(HelldyeColors.Surface, RoundedCornerShape(2.dp))
             .border(1.dp, HelldyeColors.LineStrong, RoundedCornerShape(2.dp))
             .padding(start = HelldyeDimens.Md),
         verticalAlignment = Alignment.CenterVertically,
@@ -431,11 +444,11 @@ private fun Composer(
     sendEnabled: Boolean,
     onToggleAttachments: () -> Unit,
 ) {
-    val shape = RoundedCornerShape(28.dp)
+    val shape = RoundedCornerShape(2.dp)
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(HelldyeColors.Black.copy(alpha = 0.90f), shape)
+            .background(HelldyeColors.Black, shape)
             .border(1.dp, HelldyeColors.LineStrong, shape)
             .padding(4.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -502,6 +515,38 @@ private suspend fun readPhoto(context: Context, uri: Uri): Attachment.Photo = wi
     )
 }
 
+private suspend fun readScreenshot(bitmap: Bitmap): Attachment.Photo = withContext(Dispatchers.IO) {
+    val maxDimension = 1600
+    val scale = minOf(1f, maxDimension.toFloat() / maxOf(bitmap.width, bitmap.height))
+    val scaled = if (scale < 1f) {
+        Bitmap.createScaledBitmap(
+            bitmap,
+            (bitmap.width * scale).toInt().coerceAtLeast(1),
+            (bitmap.height * scale).toInt().coerceAtLeast(1),
+            true,
+        )
+    } else {
+        bitmap
+    }
+
+    val output = ByteArrayOutputStream()
+    var quality = 80
+    var bytes: ByteArray
+    do {
+        output.reset()
+        scaled.compress(Bitmap.CompressFormat.JPEG, quality, output)
+        bytes = output.toByteArray()
+        quality -= 15
+    } while (bytes.size > 4 * 1024 * 1024 && quality >= 35)
+
+    if (scaled !== bitmap) scaled.recycle()
+    Attachment.Photo(
+        name = "SCREEN",
+        mimeType = "image/jpeg",
+        base64 = Base64.encodeToString(bytes, Base64.NO_WRAP),
+    )
+}
+
 private suspend fun readTextFile(context: Context, uri: Uri): Attachment.Text = withContext(Dispatchers.IO) {
     val resolver = context.contentResolver
     val bytes = resolver.openInputStream(uri)?.use { readLimited(it, 128 * 1024) }
@@ -540,7 +585,8 @@ private fun displayName(context: Context, uri: Uri): String? {
 private fun AssistantScreenPreview() {
     HelldyeTheme {
         AssistantScreen(
-            screenText = "Settings / Battery / Battery usage. The screen shows the last 24 hours.",
+            overlay = true,
+            screenshot = null,
             assistReceived = true,
             state = AssistantUiState(
                 messages = listOf(
@@ -549,12 +595,13 @@ private fun AssistantScreenPreview() {
                     ChatMessage("t", ChatRole.Tool, "bash DONE"),
                 ),
             ),
-            onSubmit = { _, _ -> },
+            onSubmit = {},
             onAddAttachment = {},
             onRemoveAttachment = {},
             onNotice = {},
             onDismissNotice = {},
             onOpenSettings = {},
+            onExpand = {},
             onClose = {},
         )
     }

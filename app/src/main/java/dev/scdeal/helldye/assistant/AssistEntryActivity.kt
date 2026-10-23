@@ -14,7 +14,7 @@ class AssistEntryActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val target = if (AssistantRole.isHeld(this)) {
-            AssistantActivity::class.java
+            AssistantOverlayActivity::class.java
         } else {
             MainActivity::class.java
         }

@@ -22,16 +22,20 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
+import java.util.concurrent.ConcurrentLinkedQueue
 
 class AssistantViewModel(application: Application) : AndroidViewModel(application) {
     private val settings = SettingsStore(application)
-    private val _state = MutableStateFlow(AssistantUiState())
+    private val _state = MutableStateFlow(
+        AssistantUiState(attachments = AssistantDraftStore.attachments),
+    )
     val state: StateFlow<AssistantUiState> = _state.asStateFlow()
 
     private var client: GatewayClient? = null
     private var streamJob: Job? = null
     private var activeAssistantId: String? = null
     private val toolMessages = mutableMapOf<String, String>()
+    private val pendingUserEchoes = ConcurrentLinkedQueue<String>()
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
@@ -47,7 +51,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    fun submit(text: String, screenText: String?) {
+    fun submit(text: String) {
         val prompt = text.trim()
         val attachments = _state.value.attachments
         if (prompt.isEmpty() && attachments.isEmpty()) return
@@ -60,6 +64,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
         val display = prompt.ifBlank { "Use the attached context." }
         addUserMessage(display)
+        pendingUserEchoes.add(display)
+        AssistantDraftStore.clear()
         _state.update {
             it.copy(attachments = emptyList(), streaming = true, error = null, notice = null)
         }
@@ -72,7 +78,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 gateway.prompt(
                     sessionId = session.id,
                     message = prompt.ifBlank { "Use the attached context." },
-                    context = PromptContext.build(screenText, attachments),
+                    context = PromptContext.build(attachments),
                     images = attachments.filterIsInstance<Attachment.Photo>().map {
                         GatewayImage(it.mimeType, it.base64)
                     },
@@ -83,6 +89,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     streamJob?.cancel()
                     streamJob = null
                 }
+                pendingUserEchoes.clear()
                 _state.update {
                     it.copy(
                         streaming = false,
@@ -102,14 +109,18 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun addAttachment(attachment: Attachment) {
-        _state.update { it.copy(attachments = it.attachments + attachment, notice = null) }
+        _state.update { state ->
+            val next = state.attachments + attachment
+            AssistantDraftStore.attachments = next
+            state.copy(attachments = next, notice = null)
+        }
     }
 
     fun removeAttachment(index: Int) {
         _state.update { state ->
-            state.copy(
-                attachments = state.attachments.filterIndexed { itemIndex, _ -> itemIndex != index },
-            )
+            val next = state.attachments.filterIndexed { itemIndex, _ -> itemIndex != index }
+            AssistantDraftStore.attachments = next
+            state.copy(attachments = next)
         }
     }
 
@@ -136,6 +147,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             client = null
             activeAssistantId = null
             toolMessages.clear()
+            pendingUserEchoes.clear()
             GatewaySessionStore.reset()
         }
         return client ?: GatewayClient(config).also {
@@ -194,12 +206,19 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             "agent_start" -> _state.update { it.copy(streaming = true) }
             "agent_settled" -> {
                 activeAssistantId = null
+                pendingUserEchoes.clear()
                 _state.update { it.copy(streaming = false) }
             }
             "message_start" -> {
                 val message = payload.optJSONObject("message") ?: return
                 when (message.optString("role")) {
-                    "user" -> addUserMessage(messageText(message))
+                    "user" -> {
+                        if (pendingUserEchoes.isNotEmpty()) {
+                            pendingUserEchoes.poll()
+                        } else {
+                            addUserMessage(UserMessageText.clean(messageText(message)))
+                        }
+                    }
                     "assistant" -> {
                         val id = message.optString("id").ifBlank { UUID.randomUUID().toString() }
                         activeAssistantId = id
@@ -253,6 +272,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             }
             "response" -> {
                 if (payload.optString("command") == "prompt" && !payload.optBoolean("success", true)) {
+                    pendingUserEchoes.clear()
                     _state.update {
                         it.copy(
                             streaming = false,
@@ -262,6 +282,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 }
             }
             "gateway_exit" -> {
+                pendingUserEchoes.clear()
                 _state.update {
                     it.copy(
                         streaming = false,
@@ -334,4 +355,5 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             else -> ""
         }
     }
+
 }

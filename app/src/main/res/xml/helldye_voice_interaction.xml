@@ -8,6 +8,6 @@
     android:supportsLaunchVoiceAssistFromKeyguard="true"
     android:supportsLocalInteraction="true"
     android:usesAssistData="true"
-    android:usesAssistScreenshots="false"
-    android:usesAssistStructureScreenContent="true"
+    android:usesAssistScreenshots="true"
+    android:usesAssistStructureScreenContent="false"
     tools:targetApi="37" />

@@ -10,13 +10,14 @@ The project is a clean build. It does not extend FRESKIEL.
 
 - default-assistant role onboarding;
 - `VoiceInteractionService` and session service;
-- assist gesture reads visible text only (no screenshot), capped at 4,000 characters;
-- transparent assistant overlay with a bottom composer, photo/screen/file attachments, streaming
-  replies, and a full-session view;
+- assist gesture captures a screenshot on request only; visible text is not read or sent automatically;
+- transparent assist overlay with a blurred/dimmed background, opaque messages, and a bottom composer;
+- opaque in-app session view; the overlay expand button opens the same Pi session there;
+- photo, current-screen, and text-file attachments;
 - Pi gateway with one Pi-Bolt process per session, SSE replay, abort, multi-session support, and a
   read-only tool allowlist by default;
 - gateway URL/token/workspace settings in the app;
-- voice capture and real screenshots are not connected yet.
+- voice capture is not connected yet.
 
 Pi-Bolt is the intended backend on both the PC and Termux. The Android app does not bundle Node or
 run a Pi process itself.
