@@ -21,6 +21,7 @@ class HelldyeVoiceInteractionSession(
 
     override fun onHandleAssist(state: AssistState) {
         if (state.index != 0) return
+        AssistInbox.markAssistReceived()
         val structure = state.assistStructure ?: return
         AssistInbox.publish(structure.extractText())
     }
