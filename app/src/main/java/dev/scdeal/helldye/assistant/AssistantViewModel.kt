@@ -1,51 +1,337 @@
 package dev.scdeal.helldye.assistant
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import dev.scdeal.helldye.gateway.GatewayClient
+import dev.scdeal.helldye.gateway.GatewayEvent
+import dev.scdeal.helldye.gateway.GatewayException
+import dev.scdeal.helldye.gateway.GatewayImage
+import dev.scdeal.helldye.gateway.GatewaySession
+import dev.scdeal.helldye.gateway.GatewaySessionStore
+import dev.scdeal.helldye.gateway.SettingsStore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
+import java.util.UUID
 
-enum class AssistantPhase(val status: String, val hint: String) {
-    Ready("READY", "Type a request. Screen text is read only when you ask."),
-    Thinking("THINKING", "Preparing a response."),
-    Answer("ANSWER", "Response ready."),
-    Error("ERROR", "Something needs attention."),
-}
-
-data class AssistantUiState(
-    val phase: AssistantPhase = AssistantPhase.Ready,
-    val transcript: String = "",
-    val answer: String = "",
-    val notice: String? = null,
-)
-
-class AssistantViewModel : ViewModel() {
+class AssistantViewModel(application: Application) : AndroidViewModel(application) {
+    private val settings = SettingsStore(application)
     private val _state = MutableStateFlow(AssistantUiState())
     val state: StateFlow<AssistantUiState> = _state.asStateFlow()
 
-    fun submit(text: String, screenText: String?) {
-        val prompt = text.trim()
-        if (prompt.isEmpty()) return
+    private var client: GatewayClient? = null
+    private var streamJob: Job? = null
+    private var activeAssistantId: String? = null
+    private val toolMessages = mutableMapOf<String, String>()
 
-        val contextNote = if (screenText.isNullOrBlank()) {
-            "No screen context was attached."
-        } else {
-            "Screen context received: ${screenText.length} characters."
+    init {
+        viewModelScope.launch(Dispatchers.IO) {
+            val config = settings.load()
+            if (config.url.isNotBlank() && GatewaySessionStore.sessionId != null &&
+                GatewaySessionStore.fingerprint == config.fingerprint
+            ) {
+                val sessionId = GatewaySessionStore.sessionId ?: return@launch
+                val gateway = GatewayClient(config)
+                client = gateway
+                startStream(gateway, sessionId)
+            }
         }
-        _state.value = AssistantUiState(
-            phase = AssistantPhase.Answer,
-            transcript = prompt,
-            answer = "The Pi gateway is not connected yet. $contextNote",
-        )
     }
 
-    fun onMic() {
-        _state.value = _state.value.copy(
-            notice = "Voice input is not connected yet. Use TYPE for now.",
-        )
+    fun submit(text: String, screenText: String?) {
+        val prompt = text.trim()
+        val attachments = _state.value.attachments
+        if (prompt.isEmpty() && attachments.isEmpty()) return
+
+        val config = settings.load()
+        if (config.url.isBlank()) {
+            notice("Configure the Pi gateway in Settings first.")
+            return
+        }
+
+        val display = prompt.ifBlank { "Use the attached context." }
+        addUserMessage(display)
+        _state.update {
+            it.copy(attachments = emptyList(), streaming = true, error = null, notice = null)
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val gateway = ensureClient(config)
+                val session = ensureSession(gateway, config)
+                startStream(gateway, session.id)
+                gateway.prompt(
+                    sessionId = session.id,
+                    message = prompt.ifBlank { "Use the attached context." },
+                    context = PromptContext.build(screenText, attachments),
+                    images = attachments.filterIsInstance<Attachment.Photo>().map {
+                        GatewayImage(it.mimeType, it.base64)
+                    },
+                )
+            } catch (error: Exception) {
+                if (error is GatewayException && error.message?.contains("HTTP 404") == true) {
+                    GatewaySessionStore.reset()
+                    streamJob?.cancel()
+                    streamJob = null
+                }
+                _state.update {
+                    it.copy(
+                        streaming = false,
+                        error = error.message ?: "Gateway request failed.",
+                    )
+                }
+            }
+        }
+    }
+
+    fun abort() {
+        val sessionId = GatewaySessionStore.sessionId ?: return
+        val gateway = client ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { gateway.abort(sessionId) }
+        }
+    }
+
+    fun addAttachment(attachment: Attachment) {
+        _state.update { it.copy(attachments = it.attachments + attachment, notice = null) }
+    }
+
+    fun removeAttachment(index: Int) {
+        _state.update { state ->
+            state.copy(
+                attachments = state.attachments.filterIndexed { itemIndex, _ -> itemIndex != index },
+            )
+        }
+    }
+
+    fun notice(message: String) {
+        _state.update { it.copy(notice = message) }
     }
 
     fun dismissNotice() {
-        _state.value = _state.value.copy(notice = null)
+        _state.update { it.copy(notice = null, error = null) }
+    }
+
+    override fun onCleared() {
+        streamJob?.cancel()
+        streamJob = null
+        // Reattach by replaying the gateway buffer; the session itself stays alive.
+        GatewaySessionStore.lastEventId = null
+        super.onCleared()
+    }
+
+    private fun ensureClient(config: dev.scdeal.helldye.gateway.GatewayConfig): GatewayClient {
+        if (GatewaySessionStore.fingerprint != config.fingerprint) {
+            streamJob?.cancel()
+            streamJob = null
+            client = null
+            activeAssistantId = null
+            toolMessages.clear()
+            GatewaySessionStore.reset()
+        }
+        return client ?: GatewayClient(config).also {
+            client = it
+            GatewaySessionStore.fingerprint = config.fingerprint
+        }
+    }
+
+    private fun ensureSession(
+        gateway: GatewayClient,
+        config: dev.scdeal.helldye.gateway.GatewayConfig,
+    ): GatewaySession {
+        val existing = GatewaySessionStore.sessionId
+        if (existing != null) {
+            return GatewaySession(existing, "", config.cwd, "running")
+        }
+        val session = gateway.createSession()
+        GatewaySessionStore.sessionId = session.id
+        GatewaySessionStore.lastEventId = null
+        GatewaySessionStore.fingerprint = config.fingerprint
+        _state.update { it.copy(sessionId = session.id) }
+        return session
+    }
+
+    private fun startStream(gateway: GatewayClient, sessionId: String) {
+        if (streamJob?.isActive == true) return
+        streamJob = viewModelScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                try {
+                    gateway.events(sessionId, GatewaySessionStore.lastEventId).collect { event ->
+                        event.id?.let { GatewaySessionStore.lastEventId = it }
+                        handleEvent(event)
+                    }
+                    delay(1_000)
+                } catch (error: Exception) {
+                    if (!isActive) return@launch
+                    if (error is GatewayException) {
+                        _state.update { it.copy(error = error.message) }
+                        if (error.message?.contains("HTTP 401") == true ||
+                            error.message?.contains("HTTP 404") == true
+                        ) {
+                            GatewaySessionStore.reset()
+                            streamJob = null
+                            return@launch
+                        }
+                    }
+                    delay(1_000)
+                }
+            }
+        }
+    }
+
+    private fun handleEvent(event: GatewayEvent) {
+        val payload = event.payload
+        when (payload.optString("type")) {
+            "agent_start" -> _state.update { it.copy(streaming = true) }
+            "agent_settled" -> {
+                activeAssistantId = null
+                _state.update { it.copy(streaming = false) }
+            }
+            "message_start" -> {
+                val message = payload.optJSONObject("message") ?: return
+                when (message.optString("role")) {
+                    "user" -> addUserMessage(messageText(message))
+                    "assistant" -> {
+                        val id = message.optString("id").ifBlank { UUID.randomUUID().toString() }
+                        activeAssistantId = id
+                        _state.update {
+                            it.copy(
+                                messages = it.messages + ChatMessage(
+                                    id = id,
+                                    role = ChatRole.Assistant,
+                                    text = messageText(message),
+                                ),
+                            )
+                        }
+                    }
+                }
+            }
+            "message_update" -> {
+                val update = payload.optJSONObject("assistantMessageEvent") ?: return
+                if (update.optString("type") == "text_delta") {
+                    appendAssistant(update.optString("delta"))
+                }
+            }
+            "message_end" -> {
+                val message = payload.optJSONObject("message") ?: return
+                if (message.optString("role") == "assistant") {
+                    val id = activeAssistantId
+                    if (id != null) replaceAssistant(id, messageText(message))
+                    activeAssistantId = null
+                }
+            }
+            "tool_execution_start" -> {
+                val callId = payload.optString("toolCallId")
+                val name = payload.optString("toolName")
+                val id = "tool-$callId-${UUID.randomUUID()}"
+                toolMessages[callId] = id
+                _state.update {
+                    it.copy(messages = it.messages + ChatMessage(id, ChatRole.Tool, "$name RUNNING"))
+                }
+            }
+            "tool_execution_end" -> {
+                val callId = payload.optString("toolCallId")
+                val id = toolMessages.remove(callId) ?: return
+                val name = payload.optString("toolName")
+                val status = if (payload.optBoolean("isError")) "FAILED" else "DONE"
+                _state.update { state ->
+                    state.copy(
+                        messages = state.messages.map {
+                            if (it.id == id) it.copy(text = "$name $status") else it
+                        },
+                    )
+                }
+            }
+            "response" -> {
+                if (payload.optString("command") == "prompt" && !payload.optBoolean("success", true)) {
+                    _state.update {
+                        it.copy(
+                            streaming = false,
+                            error = payload.optString("error").ifBlank { "Prompt rejected." },
+                        )
+                    }
+                }
+            }
+            "gateway_exit" -> {
+                _state.update {
+                    it.copy(
+                        streaming = false,
+                        error = "Pi process exited. Send again to start a new session.",
+                    )
+                }
+                GatewaySessionStore.reset()
+                streamJob?.cancel()
+                streamJob = null
+            }
+        }
+    }
+
+    private fun appendAssistant(delta: String) {
+        if (delta.isEmpty()) return
+        val id = activeAssistantId ?: UUID.randomUUID().toString().also { newId ->
+            activeAssistantId = newId
+            _state.update {
+                it.copy(messages = it.messages + ChatMessage(newId, ChatRole.Assistant, ""))
+            }
+        }
+        _state.update { state ->
+            state.copy(
+                messages = state.messages.map {
+                    if (it.id == id) it.copy(text = it.text + delta) else it
+                },
+            )
+        }
+    }
+
+    private fun replaceAssistant(id: String, text: String) {
+        if (text.isEmpty()) return
+        _state.update { state ->
+            state.copy(
+                messages = state.messages.map {
+                    if (it.id == id) it.copy(text = text) else it
+                },
+            )
+        }
+    }
+
+    private fun addUserMessage(text: String) {
+        if (text.isBlank()) return
+        _state.update { state ->
+            val last = state.messages.lastOrNull()
+            if (last?.role == ChatRole.User && last.text == text) {
+                state
+            } else {
+                state.copy(
+                    messages = state.messages + ChatMessage(
+                        id = UUID.randomUUID().toString(),
+                        role = ChatRole.User,
+                        text = text,
+                    ),
+                )
+            }
+        }
+    }
+
+    private fun messageText(message: JSONObject): String {
+        val content = message.opt("content") ?: return ""
+        return when (content) {
+            is String -> content
+            is JSONArray -> buildString {
+                for (index in 0 until content.length()) {
+                    val block = content.optJSONObject(index) ?: continue
+                    if (block.optString("type") == "text") append(block.optString("text"))
+                }
+            }
+            else -> ""
+        }
     }
 }

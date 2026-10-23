@@ -33,8 +33,10 @@ import dev.scdeal.helldye.ui.theme.HelldyeTheme
 fun OnboardingScreen(
     roleAvailable: Boolean,
     roleHeld: Boolean,
+    gatewayConfigured: Boolean,
     onRequestRole: () -> Unit,
     onOpenAssistantSettings: () -> Unit,
+    onOpenGatewaySettings: () -> Unit,
     onOpenAssistant: () -> Unit,
 ) {
     Column(
@@ -100,6 +102,14 @@ fun OnboardingScreen(
         )
         Hairline(color = HelldyeColors.LineSoft)
         SettingRow(
+            name = "Pi gateway",
+            state = if (gatewayConfigured) "CONFIGURED" else "NOT CONFIGURED",
+            action = "CONFIGURE",
+            onAction = onOpenGatewaySettings,
+            modifier = Modifier.padding(vertical = HelldyeDimens.Xs),
+        )
+        Hairline(color = HelldyeColors.LineSoft)
+        SettingRow(
             name = "Microphone",
             state = "NOT CONNECTED",
             modifier = Modifier.padding(vertical = HelldyeDimens.Xs),
@@ -149,8 +159,10 @@ private fun OnboardingPreview() {
         OnboardingScreen(
             roleAvailable = true,
             roleHeld = false,
+            gatewayConfigured = false,
             onRequestRole = {},
             onOpenAssistantSettings = {},
+            onOpenGatewaySettings = {},
             onOpenAssistant = {},
         )
     }
