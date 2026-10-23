@@ -87,7 +87,7 @@ fun OnboardingScreen(
             } else {
                 null
             },
-            onAction = onRequestRole,
+            onAction = if (roleHeld) onOpenAssistantSettings else onRequestRole,
             modifier = Modifier.padding(vertical = HelldyeDimens.Xs),
         )
         Hairline(color = HelldyeColors.LineSoft)

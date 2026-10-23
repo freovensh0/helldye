@@ -64,6 +64,7 @@ import dev.scdeal.helldye.ui.theme.HelldyeTheme
 @Composable
 fun AssistantScreen(
     screenText: String?,
+    assistReceived: Boolean,
     state: AssistantUiState,
     onSubmit: (String, String?) -> Unit,
     onMic: () -> Unit,
@@ -100,7 +101,7 @@ fun AssistantScreen(
             .background(HelldyeColors.Black)
             .windowInsetsPadding(WindowInsets.safeDrawing),
     ) {
-        AssistantTopBar(contextEnabled = screenText != null)
+        AssistantTopBar(contextEnabled = screenText != null, assistReceived = assistReceived)
         Hairline()
 
         Column(
@@ -147,8 +148,12 @@ fun AssistantScreen(
                 ScreenContextPanel(screenText)
             } else {
                 WarningBanner(
-                    text = "Screen context is off. Enable it in system settings.",
-                    action = "OPEN",
+                    text = if (assistReceived) {
+                        "The assist request arrived without readable screen text."
+                    } else {
+                        "No screen text was attached. Trigger HELLDYE from the assist gesture."
+                    },
+                    action = "SETTINGS",
                     onAction = onOpenSettings,
                 )
             }
@@ -208,7 +213,14 @@ fun AssistantScreen(
 }
 
 @Composable
-private fun AssistantTopBar(contextEnabled: Boolean) {
+private fun AssistantTopBar(contextEnabled: Boolean, assistReceived: Boolean) {
+    val label = when {
+        contextEnabled -> "SCREEN ON"
+        assistReceived -> "SCREEN EMPTY"
+        else -> "NO ASSIST"
+    }
+    val tone = if (contextEnabled) StatusTone.Active else StatusTone.Neutral
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -218,10 +230,7 @@ private fun AssistantTopBar(contextEnabled: Boolean) {
     ) {
         Wordmark()
         Spacer(Modifier.weight(1f))
-        StatusChip(
-            label = if (contextEnabled) "SCREEN ON" else "SCREEN OFF",
-            tone = if (contextEnabled) StatusTone.Active else StatusTone.Neutral,
-        )
+        StatusChip(label = label, tone = tone)
     }
 }
 
@@ -381,6 +390,7 @@ private fun AssistantScreenPreview() {
     HelldyeTheme {
         AssistantScreen(
             screenText = "Settings / Battery / Battery usage. The screen shows the last 24 hours.",
+            assistReceived = true,
             state = AssistantUiState(
                 phase = AssistantPhase.Answer,
                 transcript = "What changed in my battery settings?",

@@ -24,11 +24,18 @@ object AssistantRole {
         }
 
     fun openSystemSettings(context: Context) {
-        val intent = Intent(Settings.ACTION_VOICE_INPUT_SETTINGS)
-        try {
-            context.startActivity(intent)
-        } catch (_: ActivityNotFoundException) {
-            context.startActivity(Intent(Settings.ACTION_SETTINGS))
+        val actions = listOf(
+            Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS,
+            Settings.ACTION_VOICE_INPUT_SETTINGS,
+            Settings.ACTION_SETTINGS,
+        )
+        for (action in actions) {
+            try {
+                context.startActivity(Intent(action))
+                return
+            } catch (_: ActivityNotFoundException) {
+                // Try the next system screen.
+            }
         }
     }
 }

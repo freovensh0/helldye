@@ -25,10 +25,12 @@ class AssistantActivity : ComponentActivity() {
         setContent {
             HelldyeTheme {
                 val screenText by AssistInbox.screenText.collectAsStateWithLifecycle()
+                val assistReceived by AssistInbox.assistReceived.collectAsStateWithLifecycle()
                 val state by viewModel.state.collectAsStateWithLifecycle()
 
                 AssistantScreen(
                     screenText = screenText,
+                    assistReceived = assistReceived,
                     state = state,
                     onSubmit = viewModel::submit,
                     onMic = viewModel::onMic,
