@@ -26,6 +26,21 @@
         </activity>
 
         <activity
+            android:name=".assistant.AssistEntryActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:launchMode="singleTop"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.Helldye.Assistant">
+            <intent-filter>
+                <action android:name="android.intent.action.ASSIST" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
             android:name=".assistant.AssistantActivity"
             android:excludeFromRecents="true"
             android:exported="false"
