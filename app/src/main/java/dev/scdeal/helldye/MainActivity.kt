@@ -16,8 +16,10 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import dev.scdeal.helldye.assistant.AssistantActivity
+import dev.scdeal.helldye.gateway.SettingsStore
 import dev.scdeal.helldye.role.AssistantRole
 import dev.scdeal.helldye.ui.OnboardingScreen
+import dev.scdeal.helldye.ui.SettingsActivity
 import dev.scdeal.helldye.ui.theme.HelldyeTheme
 
 class MainActivity : ComponentActivity() {
@@ -30,7 +32,9 @@ class MainActivity : ComponentActivity() {
         setContent {
             HelldyeTheme {
                 val activity = this@MainActivity
+                val settings = remember { SettingsStore(activity) }
                 var roleHeld by remember { mutableStateOf(AssistantRole.isHeld(activity)) }
+                var gatewayConfigured by remember { mutableStateOf(settings.isConfigured()) }
                 val roleAvailable = remember { AssistantRole.isAvailable(activity) }
                 val lifecycleOwner = LocalLifecycleOwner.current
                 val roleLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
@@ -43,6 +47,7 @@ class MainActivity : ComponentActivity() {
                     val observer = LifecycleEventObserver { _, event ->
                         if (event == Lifecycle.Event.ON_RESUME) {
                             roleHeld = AssistantRole.isHeld(activity)
+                            gatewayConfigured = settings.isConfigured()
                         }
                     }
                     lifecycleOwner.lifecycle.addObserver(observer)
@@ -52,11 +57,15 @@ class MainActivity : ComponentActivity() {
                 OnboardingScreen(
                     roleAvailable = roleAvailable,
                     roleHeld = roleHeld,
+                    gatewayConfigured = gatewayConfigured,
                     onRequestRole = {
                         AssistantRole.requestIntent(activity)?.let(roleLauncher::launch)
                     },
                     onOpenAssistantSettings = {
                         AssistantRole.openSystemSettings(activity)
+                    },
+                    onOpenGatewaySettings = {
+                        activity.startActivity(Intent(activity, SettingsActivity::class.java))
                     },
                     onOpenAssistant = {
                         activity.startActivity(Intent(activity, AssistantActivity::class.java))

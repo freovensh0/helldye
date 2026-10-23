@@ -46,6 +46,8 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.androidx.lifecycle.viewmodel.ktx)
+    implementation(libs.androidx.security.crypto)
     implementation(libs.kotlinx.coroutines.core)
 
     implementation(libs.androidx.compose.foundation)

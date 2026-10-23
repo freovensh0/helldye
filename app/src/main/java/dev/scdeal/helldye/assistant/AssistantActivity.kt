@@ -1,5 +1,6 @@
 package dev.scdeal.helldye.assistant
 
+import android.content.Intent
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -8,8 +9,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import dev.scdeal.helldye.role.AssistantRole
 import dev.scdeal.helldye.ui.AssistantScreen
+import dev.scdeal.helldye.ui.SettingsActivity
 import dev.scdeal.helldye.ui.theme.HelldyeTheme
 
 class AssistantActivity : ComponentActivity() {
@@ -33,9 +34,13 @@ class AssistantActivity : ComponentActivity() {
                     assistReceived = assistReceived,
                     state = state,
                     onSubmit = viewModel::submit,
-                    onMic = viewModel::onMic,
+                    onAddAttachment = viewModel::addAttachment,
+                    onRemoveAttachment = viewModel::removeAttachment,
+                    onNotice = viewModel::notice,
                     onDismissNotice = viewModel::dismissNotice,
-                    onOpenSettings = { AssistantRole.openSystemSettings(this) },
+                    onOpenSettings = {
+                        startActivity(Intent(this, SettingsActivity::class.java))
+                    },
                     onClose = { finish() },
                 )
             }

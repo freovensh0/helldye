@@ -4,6 +4,7 @@ androidxCore = "1.19.1"
 androidxLifecycle = "2.11.0"
 androidxActivity = "1.13.0"
 androidxComposeBom = "2026.09.00"
+androidxSecurity = "1.1.0"
 junit = "4.13.2"
 kotlin = "2.4.20"
 coroutines = "1.11.0"
@@ -14,6 +15,8 @@ androidx-activity-compose = { module = "androidx.activity:activity-compose", ver
 androidx-lifecycle-runtime-ktx = { module = "androidx.lifecycle:lifecycle-runtime-ktx", version.ref = "androidxLifecycle" }
 androidx-lifecycle-runtime-compose = { module = "androidx.lifecycle:lifecycle-runtime-compose", version.ref = "androidxLifecycle" }
 androidx-lifecycle-viewmodel-compose = { module = "androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "androidxLifecycle" }
+androidx-lifecycle-viewmodel-ktx = { module = "androidx.lifecycle:lifecycle-viewmodel-ktx", version.ref = "androidxLifecycle" }
+androidx-security-crypto = { module = "androidx.security:security-crypto", version.ref = "androidxSecurity" }
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "androidxComposeBom" }
 androidx-compose-foundation = { module = "androidx.compose.foundation:foundation" }
 androidx-compose-ui = { module = "androidx.compose.ui:ui" }
