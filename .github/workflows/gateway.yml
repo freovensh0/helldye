@@ -1,0 +1,38 @@
+name: gateway
+
+on:
+    pull_request:
+        paths:
+            - 'gateway/**'
+            - '.github/workflows/gateway.yml'
+    push:
+        branches: [main]
+        paths:
+            - 'gateway/**'
+            - '.github/workflows/gateway.yml'
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+concurrency:
+    group: gateway-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    check:
+        name: Cargo check and test
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - uses: actions/checkout@v7
+
+            - uses: dtolnay/rust-toolchain@stable
+
+            - uses: Swatinem/rust-cache@v2
+              with:
+                  workspaces: gateway
+
+            - name: Check and test
+              working-directory: gateway
+              run: cargo test --locked
