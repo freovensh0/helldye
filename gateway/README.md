@@ -64,8 +64,8 @@ Open HELLDYE, choose **CONFIGURE** next to **Pi gateway**, and set:
 - **Token**: the same token passed to the gateway.
 - **Workspace**: optional working directory for Pi-Bolt; defaults to the gateway process directory.
 
-The app creates a session on the first prompt and lists live sessions in the session picker. Pi now
-writes each session to its own Pi session file (`--session-id`).
+The app creates a session on the first prompt and lists persisted sessions in the session picker. Pi
+writes each session to its own Pi session file (`--session-id`), so a stopped gateway can resume it.
 
 ## API
 
@@ -79,7 +79,8 @@ All `/v1` routes require `Authorization: Bearer <token>` when a token is configu
 | `POST` | `/v1/sessions` | Create a session (`cwd`, `name`). |
 | `GET` | `/v1/sessions/{id}` | Session status. |
 | `DELETE` | `/v1/sessions/{id}` | Close stdin and let Pi exit. |
-| `GET` | `/v1/sessions/{id}/events` | SSE stream; supports `Last-Event-ID`. |
+| `GET` | `/v1/sessions/{id}/events` | SSE stream; supports `Last-Event-ID` and `?replay=false`. |
+| `GET` | `/v1/sessions/{id}/messages` | Full Pi transcript. |
 | `POST` | `/v1/sessions/{id}/prompt` | Send `message`, optional `context`, optional `images`. |
 | `POST` | `/v1/sessions/{id}/abort` | Abort the active turn. |
 | `GET` | `/v1/sessions/{id}/models` | Models configured in Pi. |
@@ -98,8 +99,11 @@ All `/v1` routes require `Authorization: Bearer <token>` when a token is configu
 
 ## Limits
 
-- Event replay is an in-memory ring of 4,096 events per session. A restarted gateway loses the
-  session list and replay history; Pi keeps its own session files.
+- Event replay is an in-memory ring of 4,096 events per session. The session list is persisted to
+  `~/.local/share/helldye/sessions.json` (`HELLDYE_STATE_FILE` overrides it), and Pi keeps each
+  session's transcript in its own session file; restarting the gateway resumes it on the next request.
+- A stopped session is started lazily with `pi --session-id <id>`; the app loads `/messages` first and
+  then opens the event stream with `?replay=false`.
 - Prompts are accepted asynchronously; streamed output and command responses arrive on SSE.
 - Pi-Bolt's stderr is logged to the gateway's stderr. Do not put screen text in prompts that you do
   not want visible in transport or Pi logs.
