@@ -1,6 +1,9 @@
 package dev.scdeal.helldye.ui
 
+import android.content.ClipboardManager
 import android.content.Context
+import android.content.pm.PackageManager
+import android.Manifest
 import android.graphics.Bitmap
 import android.net.Uri
 import android.provider.OpenableColumns
@@ -57,23 +60,35 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import dev.scdeal.helldye.R
 import dev.scdeal.helldye.assistant.AssistantUiState
 import dev.scdeal.helldye.assistant.Attachment
 import dev.scdeal.helldye.assistant.ChatMessage
 import dev.scdeal.helldye.assistant.ChatRole
+import dev.scdeal.helldye.assistant.ExtensionDialog
+import dev.scdeal.helldye.assistant.ExtensionWidget
+import dev.scdeal.helldye.assistant.NoticeTone
 import dev.scdeal.helldye.assistant.SlashCommand
 import dev.scdeal.helldye.assistant.SlashCommands
+import dev.scdeal.helldye.assistant.ToolInfo
+import dev.scdeal.helldye.assistant.ToolSummary
+import dev.scdeal.helldye.assistant.UsageSummary
 import dev.scdeal.helldye.gateway.GatewayModel
+import dev.scdeal.helldye.gateway.GatewaySession
+import dev.scdeal.helldye.gateway.GatewayStats
 import dev.scdeal.helldye.ui.components.SectionLabel
 import dev.scdeal.helldye.ui.components.StatusChip
 import dev.scdeal.helldye.ui.components.StatusTone
 import dev.scdeal.helldye.ui.components.WarningBanner
 import dev.scdeal.helldye.ui.components.Wordmark
+import dev.scdeal.helldye.ui.markdown.MarkdownText
 import dev.scdeal.helldye.ui.theme.HelldyeColors
 import dev.scdeal.helldye.ui.theme.HelldyeDimens
 import dev.scdeal.helldye.ui.theme.HelldyeTheme
@@ -81,6 +96,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.InputStream
 
 @Composable
@@ -98,8 +114,21 @@ fun AssistantScreen(
     onOpenModelPicker: () -> Unit,
     onCloseModelPicker: () -> Unit,
     onSelectModel: (GatewayModel) -> Unit,
+    onOpenThinkingPicker: () -> Unit,
+    onCloseThinkingPicker: () -> Unit,
+    onSelectThinking: (String) -> Unit,
+    onExtensionValue: (String) -> Unit,
+    onExtensionConfirm: (Boolean) -> Unit,
+    onExtensionCancel: () -> Unit,
+    onEditorPrefillConsumed: () -> Unit,
     onNewSession: () -> Unit,
     onAbort: () -> Unit,
+    onCompact: () -> Unit,
+    onOpenSessions: () -> Unit,
+    onCloseSessions: () -> Unit,
+    onSwitchSession: (String) -> Unit,
+    onDeleteSession: (String) -> Unit,
+    onRenameSession: (String, String) -> Unit,
     onExpand: (() -> Unit)?,
     onClose: () -> Unit,
 ) {
@@ -118,6 +147,12 @@ fun AssistantScreen(
                 onOpenModelPicker()
                 return true
             }
+            "/thinking" -> {
+                input = ""
+                attachmentMenu = false
+                onOpenThinkingPicker()
+                return true
+            }
             "/new" -> {
                 input = ""
                 attachmentMenu = false
@@ -130,10 +165,16 @@ fun AssistantScreen(
                 onAbort()
                 return true
             }
+            "/compact" -> {
+                input = ""
+                attachmentMenu = false
+                onCompact()
+                return true
+            }
             "/help" -> {
                 input = ""
                 attachmentMenu = false
-                onNotice("Commands: /model, /new, /abort, /help")
+                onNotice("Commands: /model, /thinking, /new, /abort, /compact, /help")
                 return true
             }
         }
@@ -173,9 +214,47 @@ fun AssistantScreen(
             }
         }
     }
+    var cameraFile by remember { mutableStateOf<File?>(null) }
+    val cameraPicker = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+        val file = cameraFile
+        if (success && file != null) {
+            scope.launch {
+                runCatching { readCameraPhoto(file) }
+                    .onSuccess { onAddAttachment(it) }
+                    .onFailure { onNotice(it.message ?: "Could not read the photo.") }
+            }
+        }
+    }
+    fun takePhoto() {
+        val dir = File(context.cacheDir, "camera").apply { mkdirs() }
+        val file = File(dir, "shot-${System.currentTimeMillis()}.jpg")
+        cameraFile = file
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+        cameraPicker.launch(uri)
+    }
+
+    val speech = rememberSpeechInput(
+        onResult = { input = it },
+        onError = { onNotice(it) },
+    )
+    val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            speech.start()
+        } else {
+            onNotice("Microphone permission denied.")
+        }
+    }
+    fun startVoice() {
+        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        if (granted) speech.start() else micPermission.launch(Manifest.permission.RECORD_AUDIO)
+    }
 
     BackHandler {
         when {
+            state.extensionDialog != null -> onExtensionCancel()
+            state.sessionsOpen -> onCloseSessions()
+            state.thinkingPickerOpen -> onCloseThinkingPicker()
             state.modelPickerOpen -> onCloseModelPicker()
             attachmentMenu -> attachmentMenu = false
             showSlash -> input = ""
@@ -183,8 +262,25 @@ fun AssistantScreen(
         }
     }
 
-    LaunchedEffect(state.messages.size) {
+    val lastMessage = state.messages.lastOrNull()
+    LaunchedEffect(
+        state.messages.size,
+        lastMessage?.text?.length,
+        lastMessage?.thinking?.length,
+        lastMessage?.tool?.result?.length,
+    ) {
         if (state.messages.isNotEmpty()) listState.scrollToItem(state.messages.lastIndex)
+    }
+
+    LaunchedEffect(state.editorPrefill) {
+        state.editorPrefill?.let {
+            input = it
+            onEditorPrefillConsumed()
+        }
+    }
+
+    LaunchedEffect(state.extensionDialog?.id) {
+        if (state.extensionDialog != null) keyboard?.hide()
     }
 
     Box(
@@ -208,6 +304,7 @@ fun AssistantScreen(
                 overlay = overlay,
                 screenshot = screenshot,
                 assistReceived = assistReceived,
+                onOpenSessions = onOpenSessions,
                 onExpand = onExpand,
                 onClose = onClose,
             )
@@ -249,11 +346,14 @@ fun AssistantScreen(
                     .background(HelldyeColors.Black)
                     .padding(horizontal = HelldyeDimens.Md, vertical = HelldyeDimens.Sm),
             ) {
+                ExtensionWidgets(state.extensionWidgets, above = true)
+
                 if (state.error != null || state.notice != null) {
                     WarningBanner(
                         text = state.error ?: state.notice.orEmpty(),
                         action = "DISMISS",
                         onAction = onDismissNotice,
+                        signal = state.error != null || state.noticeTone != NoticeTone.Info,
                     )
                     Spacer(Modifier.height(HelldyeDimens.Sm))
                 }
@@ -287,6 +387,7 @@ fun AssistantScreen(
                         horizontalArrangement = Arrangement.spacedBy(HelldyeDimens.Sm),
                     ) {
                         AttachmentAction("PHOTO") { attachmentMenu = false; photoPicker.launch("image/*") }
+                        AttachmentAction("CAMERA") { attachmentMenu = false; takePhoto() }
                         if (overlay) {
                             AttachmentAction("SCREEN") {
                                 attachmentMenu = false
@@ -307,9 +408,27 @@ fun AssistantScreen(
                             }
                         }
                         AttachmentAction("FILE") { attachmentMenu = false; filePicker.launch("*/*") }
+                        AttachmentAction("PASTE") {
+                            attachmentMenu = false
+                            val clip = context.getSystemService(ClipboardManager::class.java)?.primaryClip
+                            val text = if (clip != null && clip.itemCount > 0) {
+                                clip.getItemAt(0).coerceToText(context)?.toString()
+                            } else {
+                                null
+                            }
+                            if (text.isNullOrBlank()) {
+                                onNotice("Clipboard is empty.")
+                            } else {
+                                onAddAttachment(Attachment.Text("clipboard.txt", text.take(128 * 1024)))
+                            }
+                        }
                         AttachmentAction("MODEL") {
                             attachmentMenu = false
                             onOpenModelPicker()
+                        }
+                        AttachmentAction("THINK") {
+                            attachmentMenu = false
+                            onOpenThinkingPicker()
                         }
                         AttachmentAction("SETTINGS", onOpenSettings)
                     }
@@ -333,10 +452,39 @@ fun AssistantScreen(
                     input = input,
                     onInputChange = { input = it },
                     onSend = ::send,
+                    onStop = onAbort,
+                    onVoice = ::startVoice,
+                    streaming = state.streaming,
                     sendEnabled = input.isNotBlank() || state.attachments.isNotEmpty(),
                     onToggleAttachments = { attachmentMenu = !attachmentMenu },
                 )
+
+                UsageLine(
+                    model = state.currentModel?.name,
+                    thinking = state.thinkingLevel,
+                    stats = state.stats,
+                    statuses = buildList {
+                        addAll(state.extensionStatus.values)
+                        if (state.compacting) add("COMPACTING")
+                        if (state.queued > 0) add("QUEUED ${state.queued}")
+                    },
+                )
+
+                ExtensionWidgets(state.extensionWidgets, above = false)
             }
+        }
+
+        if (state.sessionsOpen) {
+            SessionPicker(
+                sessions = state.sessions,
+                currentId = state.sessionId,
+                loading = state.sessionsLoading,
+                onSwitch = onSwitchSession,
+                onDelete = onDeleteSession,
+                onRename = onRenameSession,
+                onNew = onNewSession,
+                onClose = onCloseSessions,
+            )
         }
 
         if (state.modelPickerOpen) {
@@ -349,6 +497,25 @@ fun AssistantScreen(
                 onClose = onCloseModelPicker,
             )
         }
+
+        if (state.thinkingPickerOpen) {
+            ThinkingPicker(
+                levels = state.thinkingLevels,
+                current = state.thinkingLevel,
+                loading = state.capabilitiesLoading,
+                onSelect = onSelectThinking,
+                onClose = onCloseThinkingPicker,
+            )
+        }
+
+        state.extensionDialog?.let { dialog ->
+            ExtensionDialogCard(
+                dialog = dialog,
+                onValue = onExtensionValue,
+                onConfirm = onExtensionConfirm,
+                onCancel = onExtensionCancel,
+            )
+        }
     }
 }
 
@@ -357,6 +524,7 @@ private fun AssistantTopBar(
     overlay: Boolean,
     screenshot: Bitmap?,
     assistReceived: Boolean,
+    onOpenSessions: () -> Unit,
     onExpand: (() -> Unit)?,
     onClose: () -> Unit,
 ) {
@@ -379,6 +547,17 @@ private fun AssistantTopBar(
             label = label,
             tone = if (screenshot != null || !overlay) StatusTone.Active else StatusTone.Neutral,
         )
+        IconButton(
+            onClick = onOpenSessions,
+            modifier = Modifier.size(HelldyeDimens.TouchTarget),
+        ) {
+            Icon(
+                painter = painterResource(R.drawable.ic_sessions),
+                contentDescription = "Sessions",
+                tint = HelldyeColors.TextSecondary,
+                modifier = Modifier.size(20.dp),
+            )
+        }
         if (onExpand != null) {
             IconButton(
                 onClick = onExpand,
@@ -434,6 +613,10 @@ private fun EmptyState() {
 
 @Composable
 private fun MessageRow(message: ChatMessage) {
+    message.tool?.let {
+        ToolCard(message.id, it)
+        return
+    }
     val label = when (message.role) {
         ChatRole.User -> "YOU"
         ChatRole.Assistant -> "HELLDYE"
@@ -445,31 +628,159 @@ private fun MessageRow(message: ChatMessage) {
             style = MaterialTheme.typography.labelSmall,
             color = HelldyeColors.TextMuted,
         )
-        Spacer(Modifier.height(2.dp))
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(
-                    color = if (message.role == ChatRole.Assistant) {
-                        HelldyeColors.Surface
-                    } else {
-                        HelldyeColors.SurfaceRaised
-                    },
-                    shape = RoundedCornerShape(2.dp),
-                )
-                .border(1.dp, HelldyeColors.LineSoft, RoundedCornerShape(2.dp))
-                .padding(HelldyeDimens.Md),
-        ) {
-            Text(
-                text = message.text.ifBlank { "…" },
-                style = if (message.role == ChatRole.Tool) {
-                    MaterialTheme.typography.labelMedium
+        if (message.thinking.isNotBlank()) {
+            Spacer(Modifier.height(2.dp))
+            ThinkingBlock(message.id, message.thinking)
+        }
+        if (message.text.isNotBlank()) {
+            Spacer(Modifier.height(2.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        color = if (message.role == ChatRole.Assistant) {
+                            HelldyeColors.Surface
+                        } else {
+                            HelldyeColors.SurfaceRaised
+                        },
+                        shape = RoundedCornerShape(2.dp),
+                    )
+                    .border(1.dp, HelldyeColors.LineSoft, RoundedCornerShape(2.dp))
+                    .padding(HelldyeDimens.Md),
+            ) {
+                if (message.role == ChatRole.Assistant) {
+                    MarkdownText(message.text)
                 } else {
-                    MaterialTheme.typography.bodyLarge
-                },
-                color = if (message.role == ChatRole.Tool) HelldyeColors.TextMuted else HelldyeColors.Text,
+                    Text(
+                        text = message.text,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = HelldyeColors.Text,
+                    )
+                }
+            }
+        } else if (message.thinking.isBlank()) {
+            Text(
+                text = "…",
+                style = MaterialTheme.typography.bodyLarge,
+                color = HelldyeColors.TextMuted,
             )
         }
+    }
+}
+
+@Composable
+private fun ThinkingBlock(id: String, text: String) {
+    var expanded by rememberSaveable(id) { mutableStateOf(false) }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(HelldyeColors.SurfaceRaised, RoundedCornerShape(2.dp))
+            .border(1.dp, HelldyeColors.LineSoft, RoundedCornerShape(2.dp))
+            .clickable { expanded = !expanded }
+            .padding(HelldyeDimens.Md),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SectionLabel("THINKING")
+            Spacer(Modifier.weight(1f))
+            Text(
+                text = if (expanded) "HIDE" else "SHOW",
+                style = MaterialTheme.typography.labelSmall,
+                color = HelldyeColors.TextMuted,
+            )
+        }
+        Spacer(Modifier.height(2.dp))
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodyMedium,
+            color = HelldyeColors.TextMuted,
+            maxLines = if (expanded) Int.MAX_VALUE else 3,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun ToolCard(id: String, tool: ToolInfo) {
+    var expanded by rememberSaveable(id) { mutableStateOf(false) }
+    val status = when {
+        tool.running -> "RUNNING"
+        tool.failed -> "FAILED"
+        else -> "DONE"
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(HelldyeColors.Surface, RoundedCornerShape(2.dp))
+            .border(
+                width = 1.dp,
+                color = if (tool.failed) HelldyeColors.SignalLine else HelldyeColors.LineSoft,
+                shape = RoundedCornerShape(2.dp),
+            )
+            .clickable { expanded = !expanded }
+            .padding(HelldyeDimens.Md),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = tool.name.uppercase(),
+                style = MaterialTheme.typography.labelMedium,
+                color = HelldyeColors.Text,
+            )
+            Spacer(Modifier.weight(1f))
+            tool.durationMs?.let {
+                Text(
+                    text = ToolSummary.duration(it),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = HelldyeColors.TextMuted,
+                )
+                Spacer(Modifier.width(HelldyeDimens.Sm))
+            }
+            Text(
+                text = status,
+                style = MaterialTheme.typography.labelSmall,
+                color = if (tool.failed) HelldyeColors.Signal else HelldyeColors.TextMuted,
+            )
+        }
+        val line = ToolSummary.line(tool)
+        if (line.isNotEmpty()) {
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = line,
+                style = MaterialTheme.typography.labelSmall,
+                color = HelldyeColors.TextMuted,
+                maxLines = if (expanded) 3 else 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (expanded) {
+            if (tool.args.isNotBlank()) {
+                Spacer(Modifier.height(HelldyeDimens.Sm))
+                SectionLabel("ARGS")
+                Text(
+                    text = tool.args,
+                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                    color = HelldyeColors.TextSecondary,
+                    maxLines = 16,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (tool.result.isNotBlank()) {
+                Spacer(Modifier.height(HelldyeDimens.Sm))
+                SectionLabel("RESULT")
+                Text(
+                    text = tool.result,
+                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                    color = HelldyeColors.TextSecondary,
+                    maxLines = 40,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        Spacer(Modifier.height(2.dp))
+        Text(
+            text = if (expanded) "HIDE" else "DETAILS",
+            style = MaterialTheme.typography.labelSmall,
+            color = HelldyeColors.TextMuted,
+        )
     }
 }
 
@@ -522,23 +833,68 @@ private fun AttachmentAction(label: String, onClick: () -> Unit) {
 }
 
 @Composable
+private fun UsageLine(
+    model: String?,
+    thinking: String?,
+    stats: GatewayStats?,
+    statuses: List<String>,
+) {
+    val text = UsageSummary.text(model, thinking, stats, statuses)
+    if (text.isEmpty()) return
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.5.sp),
+        color = HelldyeColors.TextMuted,
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = HelldyeDimens.Xs, start = HelldyeDimens.Xs, end = HelldyeDimens.Xs),
+    )
+}
+
+@Composable
+private fun ExtensionWidgets(widgets: Map<String, ExtensionWidget>, above: Boolean) {
+    val blocks = widgets.values.filter { it.above == above }
+    if (blocks.isEmpty()) return
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = HelldyeDimens.Xs)
+            .padding(top = if (above) 0.dp else HelldyeDimens.Sm),
+    ) {
+        blocks.forEach { widget ->
+            widget.lines.take(12).forEach { line ->
+                Text(
+                    text = line,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = HelldyeColors.TextMuted,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun SlashPalette(
     entries: List<SlashCommand>,
     onSelect: (SlashCommand) -> Unit,
 ) {
-    Column(
+    LazyColumn(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(max = 240.dp)
             .background(HelldyeColors.Surface, RoundedCornerShape(2.dp))
             .border(1.dp, HelldyeColors.LineSoft, RoundedCornerShape(2.dp)),
     ) {
-        entries.take(7).forEach { entry ->
+        items(entries, key = { it.command }) { entry ->
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable { onSelect(entry) }
-                    .heightIn(min = 44.dp)
+                    .heightIn(min = HelldyeDimens.TouchTarget)
                     .padding(horizontal = HelldyeDimens.Md, vertical = HelldyeDimens.Sm),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -555,6 +911,192 @@ private fun SlashPalette(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SessionPicker(
+    sessions: List<GatewaySession>,
+    currentId: String?,
+    loading: Boolean,
+    onSwitch: (String) -> Unit,
+    onDelete: (String) -> Unit,
+    onRename: (String, String) -> Unit,
+    onNew: () -> Unit,
+    onClose: () -> Unit,
+) {
+    var renaming by remember { mutableStateOf<GatewaySession?>(null) }
+    var deleting by remember { mutableStateOf<String?>(null) }
+    var name by remember(renaming?.id) { mutableStateOf(renaming?.name.orEmpty()) }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.72f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(HelldyeDimens.Lg)
+                .background(HelldyeColors.Black, RoundedCornerShape(2.dp))
+                .border(1.dp, HelldyeColors.LineStrong, RoundedCornerShape(2.dp))
+                .padding(HelldyeDimens.Md),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                SectionLabel("SESSIONS")
+                Spacer(Modifier.weight(1f))
+                TextButton(
+                    onClick = onClose,
+                    modifier = Modifier.heightIn(min = HelldyeDimens.TouchTarget),
+                ) {
+                    Text(
+                        text = "CLOSE",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = HelldyeColors.TextSecondary,
+                    )
+                }
+            }
+            Spacer(Modifier.height(HelldyeDimens.Sm))
+            AttachmentAction("NEW SESSION", onNew)
+            Spacer(Modifier.height(HelldyeDimens.Sm))
+
+            when {
+                loading && sessions.isEmpty() -> Text(
+                    text = "LOADING",
+                    style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.sp),
+                    color = HelldyeColors.TextMuted,
+                )
+                sessions.isEmpty() -> Text(
+                    text = "No sessions yet.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = HelldyeColors.TextMuted,
+                )
+                else -> LazyColumn(modifier = Modifier.heightIn(max = 420.dp)) {
+                    items(sessions, key = { it.id }) { session ->
+                        val current = session.id == currentId
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = HelldyeDimens.Sm)
+                                .background(
+                                    color = if (current) HelldyeColors.SurfaceRaised else HelldyeColors.Surface,
+                                    shape = RoundedCornerShape(2.dp),
+                                )
+                                .border(
+                                    width = 1.dp,
+                                    color = if (current) HelldyeColors.LineStrong else HelldyeColors.LineSoft,
+                                    shape = RoundedCornerShape(2.dp),
+                                )
+                                .padding(HelldyeDimens.Md),
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable { onSwitch(session.id) },
+                                ) {
+                                    Text(
+                                        text = session.name.ifBlank { session.id.take(8) },
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = HelldyeColors.Text,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Text(
+                                        text = buildString {
+                                            append(session.status.ifBlank { "idle" })
+                                            append(" · ")
+                                            append(session.id.take(8))
+                                            if (current) append(" · CURRENT")
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = HelldyeColors.TextMuted,
+                                        maxLines = 1,
+                                    )
+                                }
+                                if (deleting == session.id) {
+                                    TextButton(onClick = { deleting = null }) {
+                                        Text(
+                                            text = "KEEP",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = HelldyeColors.TextSecondary,
+                                        )
+                                    }
+                                    TextButton(
+                                        onClick = {
+                                            deleting = null
+                                            onDelete(session.id)
+                                        },
+                                    ) {
+                                        Text(
+                                            text = "DELETE",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = HelldyeColors.Signal,
+                                        )
+                                    }
+                                } else {
+                                    TextButton(onClick = { renaming = session }) {
+                                        Text(
+                                            text = "RENAME",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = HelldyeColors.TextSecondary,
+                                        )
+                                    }
+                                    TextButton(onClick = { deleting = session.id }) {
+                                        Text(
+                                            text = "×",
+                                            style = MaterialTheme.typography.bodyLarge,
+                                            color = HelldyeColors.TextMuted,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        renaming?.let { session ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.72f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(HelldyeDimens.Lg)
+                        .background(HelldyeColors.Black, RoundedCornerShape(2.dp))
+                        .border(1.dp, HelldyeColors.LineStrong, RoundedCornerShape(2.dp))
+                        .padding(HelldyeDimens.Md),
+                ) {
+                    SectionLabel("RENAME SESSION")
+                    Spacer(Modifier.height(HelldyeDimens.Sm))
+                    BasicTextField(
+                        value = name,
+                        onValueChange = { name = it },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, HelldyeColors.LineSoft, RoundedCornerShape(2.dp))
+                            .padding(HelldyeDimens.Sm),
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = HelldyeColors.Text),
+                        cursorBrush = SolidColor(HelldyeColors.White),
+                        singleLine = true,
+                    )
+                    Spacer(Modifier.height(HelldyeDimens.Sm))
+                    Row(horizontalArrangement = Arrangement.spacedBy(HelldyeDimens.Sm)) {
+                        AttachmentAction("CANCEL") { renaming = null }
+                        AttachmentAction("SAVE") {
+                            renaming = null
+                            onRename(session.id, name)
+                        }
+                    }
+                }
             }
         }
     }
@@ -669,10 +1211,205 @@ private fun ModelPicker(
 }
 
 @Composable
+private fun ThinkingPicker(
+    levels: List<String>,
+    current: String?,
+    loading: Boolean,
+    onSelect: (String) -> Unit,
+    onClose: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.72f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(HelldyeDimens.Lg)
+                .background(HelldyeColors.Black, RoundedCornerShape(2.dp))
+                .border(1.dp, HelldyeColors.LineStrong, RoundedCornerShape(2.dp))
+                .padding(HelldyeDimens.Md),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                SectionLabel("THINKING")
+                Spacer(Modifier.weight(1f))
+                TextButton(
+                    onClick = onClose,
+                    modifier = Modifier.heightIn(min = HelldyeDimens.TouchTarget),
+                ) {
+                    Text(
+                        text = "CLOSE",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = HelldyeColors.TextSecondary,
+                    )
+                }
+            }
+            Spacer(Modifier.height(HelldyeDimens.Sm))
+            when {
+                loading && levels.isEmpty() -> Text(
+                    text = "LOADING",
+                    style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.sp),
+                    color = HelldyeColors.TextMuted,
+                )
+                levels.isEmpty() -> Text(
+                    text = "No thinking levels for this model.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = HelldyeColors.TextMuted,
+                )
+                else -> LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
+                    items(levels, key = { it }) { level ->
+                        val active = level == current
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onSelect(level) }
+                                .heightIn(min = HelldyeDimens.TouchTarget)
+                                .padding(horizontal = HelldyeDimens.Sm),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = level.uppercase(),
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = if (active) HelldyeColors.Text else HelldyeColors.TextSecondary,
+                                modifier = Modifier.weight(1f),
+                            )
+                            if (active) {
+                                Text(
+                                    text = "ACTIVE",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = HelldyeColors.TextSecondary,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ExtensionDialogCard(
+    dialog: ExtensionDialog,
+    onValue: (String) -> Unit,
+    onConfirm: (Boolean) -> Unit,
+    onCancel: () -> Unit,
+) {
+    var text by remember(dialog.id) {
+        mutableStateOf(
+            when (dialog) {
+                is ExtensionDialog.Editor -> dialog.prefill
+                else -> ""
+            },
+        )
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.72f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(HelldyeDimens.Lg)
+                .background(HelldyeColors.Black, RoundedCornerShape(2.dp))
+                .border(1.dp, HelldyeColors.LineStrong, RoundedCornerShape(2.dp))
+                .padding(HelldyeDimens.Md),
+        ) {
+            SectionLabel("EXTENSION")
+            Spacer(Modifier.height(HelldyeDimens.Xs))
+            Text(
+                text = dialog.title.ifBlank { "Extension request" },
+                style = MaterialTheme.typography.bodyLarge,
+                color = HelldyeColors.Text,
+            )
+            Spacer(Modifier.height(HelldyeDimens.Sm))
+            when (dialog) {
+                is ExtensionDialog.Select -> {
+                    LazyColumn(modifier = Modifier.heightIn(max = 320.dp)) {
+                        items(dialog.options, key = { it }) { option ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onValue(option) }
+                                    .heightIn(min = HelldyeDimens.TouchTarget)
+                                    .padding(horizontal = HelldyeDimens.Sm),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = option,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = HelldyeColors.Text,
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(HelldyeDimens.Sm))
+                    AttachmentAction("CANCEL", onCancel)
+                }
+                is ExtensionDialog.Confirm -> {
+                    if (dialog.message.isNotBlank()) {
+                        Text(
+                            text = dialog.message,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = HelldyeColors.TextSecondary,
+                        )
+                        Spacer(Modifier.height(HelldyeDimens.Sm))
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(HelldyeDimens.Sm)) {
+                        AttachmentAction("CANCEL", onCancel)
+                        AttachmentAction("NO") { onConfirm(false) }
+                        AttachmentAction("YES") { onConfirm(true) }
+                    }
+                }
+                is ExtensionDialog.Input, is ExtensionDialog.Editor -> {
+                    val editor = dialog is ExtensionDialog.Editor
+                    BasicTextField(
+                        value = text,
+                        onValueChange = { text = it },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = if (editor) 120.dp else HelldyeDimens.TouchTarget)
+                            .border(1.dp, HelldyeColors.LineSoft, RoundedCornerShape(2.dp))
+                            .padding(HelldyeDimens.Sm),
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = HelldyeColors.Text),
+                        cursorBrush = SolidColor(HelldyeColors.White),
+                        maxLines = if (editor) 10 else 4,
+                        decorationBox = { inner ->
+                            Box {
+                                if (text.isEmpty()) {
+                                    Text(
+                                        text = (dialog as? ExtensionDialog.Input)?.placeholder.orEmpty(),
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = HelldyeColors.TextMuted,
+                                    )
+                                }
+                                inner()
+                            }
+                        },
+                    )
+                    Spacer(Modifier.height(HelldyeDimens.Sm))
+                    Row(horizontalArrangement = Arrangement.spacedBy(HelldyeDimens.Sm)) {
+                        AttachmentAction("CANCEL", onCancel)
+                        AttachmentAction("SEND") { onValue(text) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun Composer(
     input: String,
     onInputChange: (String) -> Unit,
     onSend: () -> Unit,
+    onStop: () -> Unit,
+    onVoice: () -> Unit,
+    streaming: Boolean,
     sendEnabled: Boolean,
     onToggleAttachments: () -> Unit,
 ) {
@@ -721,14 +1458,25 @@ private fun Composer(
             },
         )
         IconButton(
-            onClick = onSend,
-            enabled = sendEnabled,
+            onClick = onVoice,
             modifier = Modifier.size(HelldyeDimens.TouchTarget),
         ) {
             Icon(
-                painter = painterResource(R.drawable.ic_send),
-                contentDescription = "Send",
-                tint = if (sendEnabled) HelldyeColors.Text else HelldyeColors.TextMuted,
+                painter = painterResource(R.drawable.ic_mic),
+                contentDescription = "Voice input",
+                tint = HelldyeColors.TextSecondary,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+        IconButton(
+            onClick = if (streaming) onStop else onSend,
+            enabled = streaming || sendEnabled,
+            modifier = Modifier.size(HelldyeDimens.TouchTarget),
+        ) {
+            Icon(
+                painter = painterResource(if (streaming) R.drawable.ic_stop else R.drawable.ic_send),
+                contentDescription = if (streaming) "Stop" else "Send",
+                tint = if (streaming || sendEnabled) HelldyeColors.Text else HelldyeColors.TextMuted,
                 modifier = Modifier.size(20.dp),
             )
         }
@@ -743,6 +1491,15 @@ private suspend fun readPhoto(context: Context, uri: Uri): Attachment.Photo = wi
     Attachment.Photo(
         name = displayName(context, uri) ?: "photo",
         mimeType = mime,
+        base64 = Base64.encodeToString(bytes, Base64.NO_WRAP),
+    )
+}
+
+private suspend fun readCameraPhoto(file: File): Attachment.Photo = withContext(Dispatchers.IO) {
+    val bytes = file.inputStream().use { readLimited(it, 4 * 1024 * 1024) }
+    Attachment.Photo(
+        name = "CAMERA",
+        mimeType = "image/jpeg",
         base64 = Base64.encodeToString(bytes, Base64.NO_WRAP),
     )
 }
@@ -836,8 +1593,21 @@ private fun AssistantScreenPreview() {
             onOpenModelPicker = {},
             onCloseModelPicker = {},
             onSelectModel = {},
+            onOpenThinkingPicker = {},
+            onCloseThinkingPicker = {},
+            onSelectThinking = {},
+            onExtensionValue = {},
+            onExtensionConfirm = {},
+            onExtensionCancel = {},
+            onEditorPrefillConsumed = {},
             onNewSession = {},
             onAbort = {},
+            onCompact = {},
+            onOpenSessions = {},
+            onCloseSessions = {},
+            onSwitchSession = {},
+            onDeleteSession = {},
+            onRenameSession = { _, _ -> },
             onExpand = {},
             onClose = {},
         )

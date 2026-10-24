@@ -7,8 +7,10 @@ data class SlashCommand(val command: String, val description: String)
 object SlashCommands {
     val local = listOf(
         SlashCommand("/model", "Select a model"),
+        SlashCommand("/thinking", "Select thinking level"),
         SlashCommand("/new", "Start a new session"),
         SlashCommand("/abort", "Stop the active run"),
+        SlashCommand("/compact", "Compact the context"),
         SlashCommand("/help", "Show available commands"),
     )
 

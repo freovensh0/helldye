@@ -13,13 +13,22 @@ The project is a clean build. It does not extend FRESKIEL.
 - assist gesture captures a screenshot on request only; visible text is not read or sent automatically;
 - transparent assist overlay with a blurred/dimmed background, opaque messages, and a bottom composer;
 - opaque in-app session view; the overlay expand button opens the same Pi session there;
-- photo, current-screen, and text-file attachments;
-- slash commands (`/model`, `/new`, `/abort`, `/help`) plus Pi prompt templates and skills;
-- model picker backed by Pi's available models and live session state;
+- photo, camera, clipboard, current-screen, and text-file attachments;
+- slash commands (`/model`, `/thinking`, `/new`, `/abort`, `/compact`, `/help`) plus Pi prompt
+  templates and skills;
+- model and thinking pickers backed by Pi's available models and session state;
+- Pi-style usage line under the composer: model, thinking, tokens, cost, cache hit, and context;
+- markdown and code rendering, streaming thinking blocks, and collapsible tool cards with
+  arguments, results, and durations;
+- stop button, queued steering messages while a turn runs, and `/compact`;
+- session picker: create, switch, rename, and delete live sessions (Pi session files persist);
+- voice input through the system speech recognizer;
+- extension UI: notifications, status entries, widgets, editor prefill, and
+  `select`/`confirm`/`input`/`editor` dialogs;
 - Pi gateway with one Pi-Bolt process per session, SSE replay, abort, multi-session support, and a
   read-only tool allowlist by default;
 - gateway URL/token/workspace settings in the app;
-- voice capture is not connected yet.
+- still missing: multiple gateway hosts, session resume after a gateway restart, fork/export/share.
 
 Pi-Bolt is the intended backend on both the PC and Termux. The Android app does not bundle Node or
 run a Pi process itself.

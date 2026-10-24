@@ -64,7 +64,8 @@ Open HELLDYE, choose **CONFIGURE** next to **Pi gateway**, and set:
 - **Token**: the same token passed to the gateway.
 - **Workspace**: optional working directory for Pi-Bolt; defaults to the gateway process directory.
 
-The app creates a session on the first prompt and reuses it until the app process or gateway dies.
+The app creates a session on the first prompt and lists live sessions in the session picker. Pi now
+writes each session to its own Pi session file (`--session-id`).
 
 ## API
 
@@ -85,14 +86,20 @@ All `/v1` routes require `Authorization: Bearer <token>` when a token is configu
 | `GET` | `/v1/sessions/{id}/commands` | Prompt templates, skills, and extension commands. |
 | `GET` | `/v1/sessions/{id}/state` | Current model, thinking level, and session state. |
 | `POST` | `/v1/sessions/{id}/model` | Switch model (`provider`, `modelId`). |
+| `GET` | `/v1/sessions/{id}/stats` | Token, cost, cache, and context usage. |
+| `GET` | `/v1/sessions/{id}/thinking` | Thinking levels for the current model. |
+| `POST` | `/v1/sessions/{id}/thinking` | Set the thinking level (`level`). |
+| `POST` | `/v1/sessions/{id}/extension_ui_response` | Answer an extension dialog (`id`, `value`/`confirmed`/`cancelled`). |
+| `POST` | `/v1/sessions/{id}/compact` | Compact the session context. |
+| `POST` | `/v1/sessions/{id}/name` | Rename the session (`name`). |
 
-`context` is prepended to the prompt as-is. The Android client wraps screen text in
-`<screen_context>` and text files in `<file name="...">` before sending it.
+`context` is prepended to the prompt as-is. The Android client wraps text files in
+`<file name="...">` before sending them; screen text is not read.
 
 ## Limits
 
-- Event replay is an in-memory ring of 4,096 events per session. A restarted gateway loses sessions
-  and replay history.
+- Event replay is an in-memory ring of 4,096 events per session. A restarted gateway loses the
+  session list and replay history; Pi keeps its own session files.
 - Prompts are accepted asynchronously; streamed output and command responses arrive on SSE.
 - Pi-Bolt's stderr is logged to the gateway's stderr. Do not put screen text in prompts that you do
   not want visible in transport or Pi logs.

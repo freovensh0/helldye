@@ -44,6 +44,23 @@ data class GatewayCommand(
     val source: String,
 )
 
+data class GatewayStats(
+    val inputTokens: Long = 0,
+    val outputTokens: Long = 0,
+    val cacheReadTokens: Long = 0,
+    val cacheWriteTokens: Long = 0,
+    val totalTokens: Long = 0,
+    val cost: Double = 0.0,
+    val contextTokens: Long = 0,
+    val contextWindow: Long = 0,
+    val contextPercent: Int = -1,
+)
+
+data class GatewayState(
+    val model: GatewayModel?,
+    val thinkingLevel: String?,
+)
+
 class GatewayException(message: String) : Exception(message)
 
 class GatewayClient(private val config: GatewayConfig) {
@@ -53,9 +70,10 @@ class GatewayClient(private val config: GatewayConfig) {
 
     fun info(): JSONObject = request("GET", "/info")
 
-    fun createSession(): GatewaySession {
+    fun createSession(name: String? = null): GatewaySession {
         val body = JSONObject()
         if (config.cwd.isNotBlank()) body.put("cwd", config.cwd)
+        if (!name.isNullOrBlank()) body.put("name", name)
         val response = request("POST", "/sessions", body)
         return GatewaySession(
             id = response.getString("id"),
@@ -95,8 +113,43 @@ class GatewayClient(private val config: GatewayConfig) {
         request("POST", "/sessions/$sessionId/abort", JSONObject())
     }
 
+    fun compact(sessionId: String) {
+        request("POST", "/sessions/$sessionId/compact", JSONObject())
+    }
+
     fun deleteSession(sessionId: String) {
         request("DELETE", "/sessions/$sessionId")
+    }
+
+    fun sessions(): List<GatewaySession> {
+        val array = requestArray("GET", "/sessions")
+        return buildList {
+            for (index in 0 until array.length()) {
+                val session = array.optJSONObject(index) ?: continue
+                add(
+                    GatewaySession(
+                        id = session.optString("id"),
+                        name = session.optString("name"),
+                        cwd = session.optString("cwd"),
+                        status = session.optString("status"),
+                    ),
+                )
+            }
+        }
+    }
+
+    fun renameSession(sessionId: String, name: String): GatewaySession {
+        val response = request(
+            "POST",
+            "/sessions/$sessionId/name",
+            JSONObject().put("name", name),
+        )
+        return GatewaySession(
+            id = response.optString("id", sessionId),
+            name = response.optString("name", name),
+            cwd = response.optString("cwd"),
+            status = response.optString("status"),
+        )
     }
 
     fun models(sessionId: String): List<GatewayModel> {
@@ -126,9 +179,61 @@ class GatewayClient(private val config: GatewayConfig) {
         }
     }
 
-    fun currentModel(sessionId: String): GatewayModel? {
+    fun state(sessionId: String): GatewayState {
         val response = request("GET", "/sessions/$sessionId/state")
-        return response.optJSONObject("model")?.let(::model)
+        return GatewayState(
+            model = response.optJSONObject("model")?.let(::model),
+            thinkingLevel = response.optString("thinkingLevel").takeIf { it.isNotBlank() },
+        )
+    }
+
+    fun stats(sessionId: String): GatewayStats {
+        val response = request("GET", "/sessions/$sessionId/stats")
+        val tokens = response.optJSONObject("tokens") ?: JSONObject()
+        val context = response.optJSONObject("contextUsage") ?: JSONObject()
+        return GatewayStats(
+            inputTokens = tokens.optLong("input"),
+            outputTokens = tokens.optLong("output"),
+            cacheReadTokens = tokens.optLong("cacheRead"),
+            cacheWriteTokens = tokens.optLong("cacheWrite"),
+            totalTokens = tokens.optLong("total"),
+            cost = response.optDouble("cost", 0.0),
+            contextTokens = context.optLong("tokens"),
+            contextWindow = context.optLong("contextWindow"),
+            contextPercent = if (context.isNull("percent")) -1 else context.optInt("percent", -1),
+        )
+    }
+
+    fun thinkingLevels(sessionId: String): List<String> {
+        val response = request("GET", "/sessions/$sessionId/thinking")
+        val array = response.optJSONArray("levels") ?: JSONArray()
+        return buildList {
+            for (index in 0 until array.length()) {
+                array.optString(index).takeIf { it.isNotBlank() }?.let(::add)
+            }
+        }
+    }
+
+    fun setThinkingLevel(sessionId: String, level: String) {
+        request(
+            "POST",
+            "/sessions/$sessionId/thinking",
+            JSONObject().put("level", level),
+        )
+    }
+
+    fun extensionResponse(
+        sessionId: String,
+        id: String,
+        value: String? = null,
+        confirmed: Boolean? = null,
+        cancelled: Boolean = false,
+    ) {
+        val body = JSONObject().put("id", id)
+        value?.let { body.put("value", it) }
+        confirmed?.let { body.put("confirmed", it) }
+        if (cancelled) body.put("cancelled", true)
+        request("POST", "/sessions/$sessionId/extension_ui_response", body)
     }
 
     fun setModel(sessionId: String, model: GatewayModel) {
@@ -205,6 +310,16 @@ class GatewayClient(private val config: GatewayConfig) {
     }
 
     private fun request(method: String, path: String, body: JSONObject? = null): JSONObject {
+        val text = requestText(method, path, body)
+        return if (text.isBlank() || text == "null") JSONObject() else JSONObject(text)
+    }
+
+    private fun requestArray(method: String, path: String, body: JSONObject? = null): JSONArray {
+        val text = requestText(method, path, body)
+        return if (text.isBlank()) JSONArray() else JSONArray(text)
+    }
+
+    private fun requestText(method: String, path: String, body: JSONObject? = null): String {
         val connection = openConnection(path, method)
         if (body != null) {
             connection.doOutput = true
@@ -221,7 +336,7 @@ class GatewayClient(private val config: GatewayConfig) {
         if (code !in 200..299) {
             throw GatewayException("HTTP $code: ${text.take(300)}")
         }
-        return if (text.isBlank()) JSONObject() else JSONObject(text)
+        return text
     }
 
     private fun openConnection(path: String, method: String): HttpURLConnection {

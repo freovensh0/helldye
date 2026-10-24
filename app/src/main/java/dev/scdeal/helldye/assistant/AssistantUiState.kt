@@ -2,6 +2,8 @@ package dev.scdeal.helldye.assistant
 
 import dev.scdeal.helldye.gateway.GatewayCommand
 import dev.scdeal.helldye.gateway.GatewayModel
+import dev.scdeal.helldye.gateway.GatewaySession
+import dev.scdeal.helldye.gateway.GatewayStats
 
 enum class ChatRole { User, Assistant, Tool }
 
@@ -9,6 +11,17 @@ data class ChatMessage(
     val id: String,
     val role: ChatRole,
     val text: String,
+    val thinking: String = "",
+    val tool: ToolInfo? = null,
+)
+
+data class ToolInfo(
+    val name: String,
+    val args: String = "",
+    val result: String = "",
+    val running: Boolean = true,
+    val failed: Boolean = false,
+    val durationMs: Long? = null,
 )
 
 sealed interface Attachment {
@@ -42,4 +55,18 @@ data class AssistantUiState(
     val currentModel: GatewayModel? = null,
     val modelPickerOpen: Boolean = false,
     val capabilitiesLoading: Boolean = false,
+    val stats: GatewayStats? = null,
+    val thinkingLevel: String? = null,
+    val thinkingLevels: List<String> = emptyList(),
+    val thinkingPickerOpen: Boolean = false,
+    val noticeTone: NoticeTone = NoticeTone.Info,
+    val extensionStatus: Map<String, String> = emptyMap(),
+    val extensionWidgets: Map<String, ExtensionWidget> = emptyMap(),
+    val extensionDialog: ExtensionDialog? = null,
+    val editorPrefill: String? = null,
+    val queued: Int = 0,
+    val compacting: Boolean = false,
+    val sessions: List<GatewaySession> = emptyList(),
+    val sessionsOpen: Boolean = false,
+    val sessionsLoading: Boolean = false,
 )
