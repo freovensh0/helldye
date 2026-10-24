@@ -65,6 +65,11 @@ abstract class AssistantHostActivity : ComponentActivity() {
                     onOpenSettings = {
                         startActivity(Intent(this@AssistantHostActivity, SettingsActivity::class.java))
                     },
+                    onOpenModelPicker = viewModel::openModelPicker,
+                    onCloseModelPicker = viewModel::closeModelPicker,
+                    onSelectModel = viewModel::selectModel,
+                    onNewSession = viewModel::newSession,
+                    onAbort = viewModel::abort,
                     onExpand = expandAction,
                     onClose = { finish() },
                 )

@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{ChildStdin, Command},
-    sync::{Mutex, RwLock, broadcast, mpsc},
+    sync::{Mutex, RwLock, broadcast, mpsc, oneshot},
     time::Duration,
 };
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
@@ -53,6 +53,7 @@ struct Session {
     streaming: AtomicBool,
     events: Mutex<VecDeque<WireEvent>>,
     tx: broadcast::Sender<WireEvent>,
+    pending: Mutex<HashMap<String, oneshot::Sender<Value>>>,
     status: Mutex<String>,
 }
 
@@ -95,6 +96,13 @@ struct ImageBody {
     mime_type: String,
 }
 
+#[derive(Deserialize)]
+struct SetModel {
+    provider: String,
+    #[serde(rename = "modelId")]
+    model_id: String,
+}
+
 impl Session {
     async fn publish(&self, kind: String, data: String) {
         let id = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
@@ -107,6 +115,25 @@ impl Session {
             events.push_back(event.clone());
         }
         let _ = self.tx.send(event);
+    }
+
+    async fn request(&self, mut command: Value, timeout: Duration) -> Result<Value, String> {
+        let id = Uuid::new_v4().to_string();
+        command["id"] = json!(id);
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(id.clone(), tx);
+        if let Err(error) = self.send(command).await {
+            self.pending.lock().await.remove(&id);
+            return Err(error);
+        }
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(_)) => Err("Pi response channel closed".to_string()),
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                Err("Pi command timed out".to_string())
+            }
+        }
     }
 
     async fn send(&self, command: Value) -> Result<(), String> {
@@ -174,6 +201,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/sessions/{id}/events", get(session_events))
         .route("/v1/sessions/{id}/prompt", post(prompt))
         .route("/v1/sessions/{id}/abort", post(abort))
+        .route("/v1/sessions/{id}/models", get(session_models))
+        .route("/v1/sessions/{id}/commands", get(session_commands))
+        .route("/v1/sessions/{id}/state", get(session_state))
+        .route("/v1/sessions/{id}/model", post(set_session_model))
         .with_state(state.clone())
         .layer(DefaultBodyLimit::max(12 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(state, require_auth));
@@ -327,6 +358,65 @@ async fn abort(
     Ok(Json(json!({ "accepted": true })))
 }
 
+async fn session_models(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let session = lookup_owned(&state, &id).await?;
+    let response = session
+        .request(
+            json!({ "type": "get_available_models" }),
+            Duration::from_secs(15),
+        )
+        .await
+        .map_err(bad_gateway)?;
+    command_data(response).map(Json)
+}
+
+async fn session_commands(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let session = lookup_owned(&state, &id).await?;
+    let response = session
+        .request(json!({ "type": "get_commands" }), Duration::from_secs(10))
+        .await
+        .map_err(bad_gateway)?;
+    command_data(response).map(Json)
+}
+
+async fn session_state(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let session = lookup_owned(&state, &id).await?;
+    let response = session
+        .request(json!({ "type": "get_state" }), Duration::from_secs(10))
+        .await
+        .map_err(bad_gateway)?;
+    command_data(response).map(Json)
+}
+
+async fn set_session_model(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<SetModel>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let session = lookup_owned(&state, &id).await?;
+    let response = session
+        .request(
+            json!({
+                "type": "set_model",
+                "provider": body.provider,
+                "modelId": body.model_id,
+            }),
+            Duration::from_secs(10),
+        )
+        .await
+        .map_err(bad_gateway)?;
+    command_data(response).map(Json)
+}
+
 async fn session_events(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -379,6 +469,31 @@ async fn session_events(
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 
+async fn lookup_owned(state: &AppState, id: &str) -> Result<Arc<Session>, (StatusCode, String)> {
+    lookup(state, id)
+        .await
+        .map_err(|status| (status, "session not found".to_string()))
+}
+
+fn command_data(response: Value) -> Result<Value, (StatusCode, String)> {
+    if response.get("success").and_then(Value::as_bool) == Some(true) {
+        Ok(response.get("data").cloned().unwrap_or(Value::Null))
+    } else {
+        Err((
+            StatusCode::BAD_GATEWAY,
+            response
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("Pi command failed")
+                .to_string(),
+        ))
+    }
+}
+
+fn bad_gateway(error: String) -> (StatusCode, String) {
+    (StatusCode::BAD_GATEWAY, error)
+}
+
 async fn lookup(state: &AppState, id: &str) -> Result<Arc<Session>, StatusCode> {
     state
         .sessions
@@ -422,6 +537,7 @@ async fn spawn_session(
         streaming: AtomicBool::new(false),
         events: Mutex::new(VecDeque::new()),
         tx,
+        pending: Mutex::new(HashMap::new()),
         status: Mutex::new("running".into()),
     });
 
@@ -451,6 +567,16 @@ async fn read_stdout(session: Arc<Session>, stdout: tokio::process::ChildStdout)
             .and_then(Value::as_str)
             .unwrap_or("raw")
             .to_string();
+
+        if let Some(response) = parsed.as_ref() {
+            if response.get("type").and_then(Value::as_str) == Some("response") {
+                if let Some(id) = response.get("id").and_then(Value::as_str) {
+                    if let Some(tx) = session.pending.lock().await.remove(id) {
+                        let _ = tx.send(response.clone());
+                    }
+                }
+            }
+        }
 
         match kind.as_str() {
             "agent_start" => session.streaming.store(true, Ordering::SeqCst),

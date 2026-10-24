@@ -1,5 +1,8 @@
 package dev.scdeal.helldye.assistant
 
+import dev.scdeal.helldye.gateway.GatewayCommand
+import dev.scdeal.helldye.gateway.GatewayModel
+
 enum class ChatRole { User, Assistant, Tool }
 
 data class ChatMessage(
@@ -34,4 +37,9 @@ data class AssistantUiState(
     val notice: String? = null,
     val error: String? = null,
     val sessionId: String? = null,
+    val models: List<GatewayModel> = emptyList(),
+    val commands: List<GatewayCommand> = emptyList(),
+    val currentModel: GatewayModel? = null,
+    val modelPickerOpen: Boolean = false,
+    val capabilitiesLoading: Boolean = false,
 )

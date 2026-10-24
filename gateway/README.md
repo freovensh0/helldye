@@ -67,6 +67,10 @@ All `/v1` routes require `Authorization: Bearer <token>` when a token is configu
 | `GET` | `/v1/sessions/{id}/events` | SSE stream; supports `Last-Event-ID`. |
 | `POST` | `/v1/sessions/{id}/prompt` | Send `message`, optional `context`, optional `images`. |
 | `POST` | `/v1/sessions/{id}/abort` | Abort the active turn. |
+| `GET` | `/v1/sessions/{id}/models` | Models configured in Pi. |
+| `GET` | `/v1/sessions/{id}/commands` | Prompt templates, skills, and extension commands. |
+| `GET` | `/v1/sessions/{id}/state` | Current model, thinking level, and session state. |
+| `POST` | `/v1/sessions/{id}/model` | Switch model (`provider`, `modelId`). |
 
 `context` is prepended to the prompt as-is. The Android client wraps screen text in
 `<screen_context>` and text files in `<file name="...">` before sending it.

@@ -4,9 +4,11 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.scdeal.helldye.gateway.GatewayClient
+import dev.scdeal.helldye.gateway.GatewayCommand
 import dev.scdeal.helldye.gateway.GatewayEvent
 import dev.scdeal.helldye.gateway.GatewayException
 import dev.scdeal.helldye.gateway.GatewayImage
+import dev.scdeal.helldye.gateway.GatewayModel
 import dev.scdeal.helldye.gateway.GatewaySession
 import dev.scdeal.helldye.gateway.GatewaySessionStore
 import dev.scdeal.helldye.gateway.SettingsStore
@@ -33,6 +35,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     private var client: GatewayClient? = null
     private var streamJob: Job? = null
+    private var capabilitiesJob: Job? = null
+    private var capabilitiesSessionId: String? = null
     private var activeAssistantId: String? = null
     private val toolMessages = mutableMapOf<String, String>()
     private val pendingUserEchoes = ConcurrentLinkedQueue<String>()
@@ -47,6 +51,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 val gateway = GatewayClient(config)
                 client = gateway
                 startStream(gateway, sessionId)
+                refreshCapabilities(gateway, sessionId, announce = false)
             }
         }
     }
@@ -75,6 +80,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 val gateway = ensureClient(config)
                 val session = ensureSession(gateway, config)
                 startStream(gateway, session.id)
+                refreshCapabilities(gateway, session.id, announce = false)
                 gateway.prompt(
                     sessionId = session.id,
                     message = prompt.ifBlank { "Use the attached context." },
@@ -108,6 +114,90 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun openModelPicker() {
+        val config = settings.load()
+        if (config.url.isBlank()) {
+            notice("Configure the Pi gateway in Settings first.")
+            return
+        }
+        _state.update { it.copy(modelPickerOpen = true) }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val gateway = ensureClient(config)
+                val session = ensureSession(gateway, config)
+                startStream(gateway, session.id)
+                refreshCapabilities(gateway, session.id, announce = true)
+            } catch (error: Exception) {
+                _state.update {
+                    it.copy(
+                        modelPickerOpen = false,
+                        error = error.message ?: "Could not load models.",
+                    )
+                }
+            }
+        }
+    }
+
+    fun closeModelPicker() {
+        _state.update { it.copy(modelPickerOpen = false) }
+    }
+
+    fun selectModel(model: GatewayModel) {
+        val sessionId = GatewaySessionStore.sessionId ?: return
+        val gateway = client ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { gateway.setModel(sessionId, model) }
+                .onSuccess {
+                    _state.update {
+                        it.copy(
+                            currentModel = model,
+                            modelPickerOpen = false,
+                            error = null,
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _state.update {
+                        it.copy(error = error.message ?: "Could not switch models.")
+                    }
+                }
+        }
+    }
+
+    fun newSession() {
+        viewModelScope.launch(Dispatchers.IO) {
+            streamJob?.cancel()
+            streamJob = null
+            capabilitiesJob?.cancel()
+            capabilitiesJob = null
+            capabilitiesSessionId = null
+            val oldSession = GatewaySessionStore.sessionId
+            val oldClient = client
+            if (oldSession != null && oldClient != null) {
+                runCatching { oldClient.deleteSession(oldSession) }
+            }
+            GatewaySessionStore.reset()
+            client = null
+            toolMessages.clear()
+            pendingUserEchoes.clear()
+            AssistantDraftStore.clear()
+            _state.value = AssistantUiState()
+
+            val config = settings.load()
+            if (config.url.isBlank()) return@launch
+            runCatching {
+                val gateway = ensureClient(config)
+                val session = ensureSession(gateway, config)
+                startStream(gateway, session.id)
+                refreshCapabilities(gateway, session.id, announce = false)
+            }.onFailure { error ->
+                _state.update {
+                    it.copy(error = error.message ?: "Could not start a new session.")
+                }
+            }
+        }
+    }
+
     fun addAttachment(attachment: Attachment) {
         _state.update { state ->
             val next = state.attachments + attachment
@@ -135,9 +225,40 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     override fun onCleared() {
         streamJob?.cancel()
         streamJob = null
+        capabilitiesJob?.cancel()
+        capabilitiesJob = null
         // Reattach by replaying the gateway buffer; the session itself stays alive.
         GatewaySessionStore.lastEventId = null
         super.onCleared()
+    }
+
+    private fun refreshCapabilities(
+        gateway: GatewayClient,
+        sessionId: String,
+        announce: Boolean,
+    ) {
+        if (capabilitiesJob?.isActive == true) return
+        if (!announce && capabilitiesSessionId == sessionId) return
+        capabilitiesSessionId = sessionId
+        capabilitiesJob = viewModelScope.launch(Dispatchers.IO) {
+            _state.update { it.copy(capabilitiesLoading = true) }
+            val models = runCatching { gateway.models(sessionId) }
+            val commands = runCatching { gateway.commands(sessionId) }
+            val current = runCatching { gateway.currentModel(sessionId) }
+            _state.update { state ->
+                state.copy(
+                    models = models.getOrElse { state.models },
+                    commands = commands.getOrElse { state.commands },
+                    currentModel = current.getOrNull() ?: state.currentModel,
+                    capabilitiesLoading = false,
+                    error = if (announce && models.isFailure) {
+                        models.exceptionOrNull()?.message ?: "Could not load models."
+                    } else {
+                        state.error
+                    },
+                )
+            }
+        }
     }
 
     private fun ensureClient(config: dev.scdeal.helldye.gateway.GatewayConfig): GatewayClient {
@@ -148,6 +269,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             activeAssistantId = null
             toolMessages.clear()
             pendingUserEchoes.clear()
+            capabilitiesSessionId = null
             GatewaySessionStore.reset()
         }
         return client ?: GatewayClient(config).also {

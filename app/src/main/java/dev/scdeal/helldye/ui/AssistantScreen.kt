@@ -10,6 +10,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,6 +26,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -43,6 +45,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -63,6 +66,9 @@ import dev.scdeal.helldye.assistant.AssistantUiState
 import dev.scdeal.helldye.assistant.Attachment
 import dev.scdeal.helldye.assistant.ChatMessage
 import dev.scdeal.helldye.assistant.ChatRole
+import dev.scdeal.helldye.assistant.SlashCommand
+import dev.scdeal.helldye.assistant.SlashCommands
+import dev.scdeal.helldye.gateway.GatewayModel
 import dev.scdeal.helldye.ui.components.SectionLabel
 import dev.scdeal.helldye.ui.components.StatusChip
 import dev.scdeal.helldye.ui.components.StatusTone
@@ -89,6 +95,11 @@ fun AssistantScreen(
     onNotice: (String) -> Unit,
     onDismissNotice: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenModelPicker: () -> Unit,
+    onCloseModelPicker: () -> Unit,
+    onSelectModel: (GatewayModel) -> Unit,
+    onNewSession: () -> Unit,
+    onAbort: () -> Unit,
     onExpand: (() -> Unit)?,
     onClose: () -> Unit,
 ) {
@@ -99,12 +110,49 @@ fun AssistantScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
+    fun runCommand(text: String): Boolean {
+        when (text.trim()) {
+            "/model" -> {
+                input = ""
+                attachmentMenu = false
+                onOpenModelPicker()
+                return true
+            }
+            "/new" -> {
+                input = ""
+                attachmentMenu = false
+                onNewSession()
+                return true
+            }
+            "/abort" -> {
+                input = ""
+                attachmentMenu = false
+                onAbort()
+                return true
+            }
+            "/help" -> {
+                input = ""
+                attachmentMenu = false
+                onNotice("Commands: /model, /new, /abort, /help")
+                return true
+            }
+        }
+        return false
+    }
+
     fun send() {
         if (input.isBlank() && state.attachments.isEmpty()) return
+        if (runCommand(input)) return
         onSubmit(input)
         input = ""
         attachmentMenu = false
         keyboard?.hide()
+    }
+
+    val slashQuery = input.trim()
+    val showSlash = slashQuery.startsWith("/") && !slashQuery.contains(' ')
+    val slashEntries = remember(slashQuery, state.commands) {
+        SlashCommands.matches(slashQuery, state.commands)
     }
 
     val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -126,7 +174,14 @@ fun AssistantScreen(
         }
     }
 
-    BackHandler { onClose() }
+    BackHandler {
+        when {
+            state.modelPickerOpen -> onCloseModelPicker()
+            attachmentMenu -> attachmentMenu = false
+            showSlash -> input = ""
+            else -> onClose()
+        }
+    }
 
     LaunchedEffect(state.messages.size) {
         if (state.messages.isNotEmpty()) listState.scrollToItem(state.messages.lastIndex)
@@ -224,6 +279,7 @@ fun AssistantScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
                             .background(HelldyeColors.Surface)
                             .border(1.dp, HelldyeColors.LineSoft, RoundedCornerShape(2.dp))
                             .padding(HelldyeDimens.Xs)
@@ -251,8 +307,26 @@ fun AssistantScreen(
                             }
                         }
                         AttachmentAction("FILE") { attachmentMenu = false; filePicker.launch("*/*") }
+                        AttachmentAction("MODEL") {
+                            attachmentMenu = false
+                            onOpenModelPicker()
+                        }
                         AttachmentAction("SETTINGS", onOpenSettings)
                     }
+                }
+
+                if (showSlash && slashEntries.isNotEmpty()) {
+                    SlashPalette(
+                        entries = slashEntries,
+                        onSelect = { entry ->
+                            if (runCommand(entry.command)) {
+                                keyboard?.hide()
+                            } else {
+                                input = entry.command + " "
+                            }
+                        },
+                    )
+                    Spacer(Modifier.height(HelldyeDimens.Sm))
                 }
 
                 Composer(
@@ -263,6 +337,17 @@ fun AssistantScreen(
                     onToggleAttachments = { attachmentMenu = !attachmentMenu },
                 )
             }
+        }
+
+        if (state.modelPickerOpen) {
+            ModelPicker(
+                models = state.models,
+                current = state.currentModel,
+                loading = state.capabilitiesLoading,
+                error = state.error,
+                onSelect = onSelectModel,
+                onClose = onCloseModelPicker,
+            )
         }
     }
 }
@@ -437,6 +522,153 @@ private fun AttachmentAction(label: String, onClick: () -> Unit) {
 }
 
 @Composable
+private fun SlashPalette(
+    entries: List<SlashCommand>,
+    onSelect: (SlashCommand) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(max = 240.dp)
+            .background(HelldyeColors.Surface, RoundedCornerShape(2.dp))
+            .border(1.dp, HelldyeColors.LineSoft, RoundedCornerShape(2.dp)),
+    ) {
+        entries.take(7).forEach { entry ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onSelect(entry) }
+                    .heightIn(min = 44.dp)
+                    .padding(horizontal = HelldyeDimens.Md, vertical = HelldyeDimens.Sm),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = entry.command,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = HelldyeColors.Text,
+                )
+                Spacer(Modifier.width(HelldyeDimens.Md))
+                Text(
+                    text = entry.description,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = HelldyeColors.TextMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ModelPicker(
+    models: List<GatewayModel>,
+    current: GatewayModel?,
+    loading: Boolean,
+    error: String?,
+    onSelect: (GatewayModel) -> Unit,
+    onClose: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.72f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(HelldyeDimens.Lg)
+                .background(HelldyeColors.Black, RoundedCornerShape(2.dp))
+                .border(1.dp, HelldyeColors.LineStrong, RoundedCornerShape(2.dp))
+                .padding(HelldyeDimens.Md),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                SectionLabel("MODEL")
+                Spacer(Modifier.weight(1f))
+                TextButton(
+                    onClick = onClose,
+                    modifier = Modifier.heightIn(min = HelldyeDimens.TouchTarget),
+                ) {
+                    Text(
+                        text = "CLOSE",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = HelldyeColors.TextSecondary,
+                    )
+                }
+            }
+            Spacer(Modifier.height(HelldyeDimens.Sm))
+            when {
+                loading && models.isEmpty() -> Text(
+                    text = "LOADING",
+                    style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.sp),
+                    color = HelldyeColors.TextMuted,
+                )
+                models.isEmpty() -> WarningBanner(
+                    text = error ?: "No models are available on this gateway.",
+                )
+                else -> LazyColumn(
+                    modifier = Modifier.heightIn(max = 380.dp),
+                    verticalArrangement = Arrangement.spacedBy(HelldyeDimens.Sm),
+                ) {
+                    items(models, key = { "${it.provider}/${it.id}" }) { model ->
+                        val active = model.provider == current?.provider && model.id == current.id
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onSelect(model) }
+                                .background(
+                                    color = if (active) HelldyeColors.SurfaceRaised else HelldyeColors.Surface,
+                                    shape = RoundedCornerShape(2.dp),
+                                )
+                                .border(
+                                    width = 1.dp,
+                                    color = if (active) HelldyeColors.LineStrong else HelldyeColors.LineSoft,
+                                    shape = RoundedCornerShape(2.dp),
+                                )
+                                .padding(HelldyeDimens.Md),
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = model.name,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = HelldyeColors.Text,
+                                    modifier = Modifier.weight(1f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                if (active) {
+                                    Text(
+                                        text = "ACTIVE",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = HelldyeColors.TextSecondary,
+                                    )
+                                }
+                            }
+                            Text(
+                                text = buildString {
+                                    append(model.provider)
+                                    if (model.contextWindow > 0) {
+                                        append("  ")
+                                        append(model.contextWindow / 1000)
+                                        append("K")
+                                    }
+                                    if (model.reasoning) append("  REASONING")
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = HelldyeColors.TextMuted,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun Composer(
     input: String,
     onInputChange: (String) -> Unit,
@@ -601,6 +833,11 @@ private fun AssistantScreenPreview() {
             onNotice = {},
             onDismissNotice = {},
             onOpenSettings = {},
+            onOpenModelPicker = {},
+            onCloseModelPicker = {},
+            onSelectModel = {},
+            onNewSession = {},
+            onAbort = {},
             onExpand = {},
             onClose = {},
         )
