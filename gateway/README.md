@@ -85,6 +85,9 @@ All `/v1` routes require `Authorization: Bearer <token>` when a token is configu
 | `GET` | `/v1/sessions/{id}/commands` | Prompt templates, skills, and extension commands. |
 | `GET` | `/v1/sessions/{id}/state` | Current model, thinking level, and session state. |
 | `POST` | `/v1/sessions/{id}/model` | Switch model (`provider`, `modelId`). |
+| `GET` | `/v1/sessions/{id}/stats` | Token, cost, cache, and context usage. |
+| `GET` | `/v1/sessions/{id}/thinking` | Thinking levels for the current model. |
+| `POST` | `/v1/sessions/{id}/thinking` | Set the thinking level (`level`). |
 
 `context` is prepended to the prompt as-is. The Android client wraps screen text in
 `<screen_context>` and text files in `<file name="...">` before sending it.

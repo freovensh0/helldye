@@ -103,6 +103,11 @@ struct SetModel {
     model_id: String,
 }
 
+#[derive(Deserialize)]
+struct SetThinking {
+    level: String,
+}
+
 impl Session {
     async fn publish(&self, kind: String, data: String) {
         let id = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
@@ -205,6 +210,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/sessions/{id}/commands", get(session_commands))
         .route("/v1/sessions/{id}/state", get(session_state))
         .route("/v1/sessions/{id}/model", post(set_session_model))
+        .route("/v1/sessions/{id}/stats", get(session_stats))
+        .route(
+            "/v1/sessions/{id}/thinking",
+            get(session_thinking).post(set_session_thinking),
+        )
         .with_state(state.clone())
         .layer(DefaultBodyLimit::max(12 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(state, require_auth));
@@ -413,6 +423,52 @@ async fn set_session_model(
                 "provider": body.provider,
                 "modelId": body.model_id,
             }),
+            Duration::from_secs(10),
+        )
+        .await
+        .map_err(bad_gateway)?;
+    command_data(response).map(Json)
+}
+
+async fn session_stats(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let session = lookup_owned(&state, &id).await?;
+    let response = session
+        .request(
+            json!({ "type": "get_session_stats" }),
+            Duration::from_secs(10),
+        )
+        .await
+        .map_err(bad_gateway)?;
+    command_data(response).map(Json)
+}
+
+async fn session_thinking(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let session = lookup_owned(&state, &id).await?;
+    let response = session
+        .request(
+            json!({ "type": "get_available_thinking_levels" }),
+            Duration::from_secs(10),
+        )
+        .await
+        .map_err(bad_gateway)?;
+    command_data(response).map(Json)
+}
+
+async fn set_session_thinking(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<SetThinking>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let session = lookup_owned(&state, &id).await?;
+    let response = session
+        .request(
+            json!({ "type": "set_thinking_level", "level": body.level }),
             Duration::from_secs(10),
         )
         .await
