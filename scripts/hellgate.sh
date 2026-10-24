@@ -26,7 +26,7 @@ Usage: hellgate <command>
   status    show whether it is running and accepts the token
   token     print the bearer token
   tools     show the Pi tool allowlist
-  tools all           enable every Android built-in
+  tools all           enable all tools, including extension tools
   tools read-only     read, grep, find, ls
   tools select        pick the allowlist interactively
   tools reset         clear the override (read-only default)
@@ -139,8 +139,13 @@ current_tools() {
 
 show_tools() {
     if [ -s "$TOOLS_FILE" ]; then
-        cat "$TOOLS_FILE"
-        echo
+        local tools
+        tools=$(cat "$TOOLS_FILE")
+        if [ "$tools" = "*" ]; then
+            echo "all tools, including extension tools"
+        else
+            echo "$tools"
+        fi
     else
         echo "read,grep,find,ls (gateway default)"
     fi
@@ -148,15 +153,22 @@ show_tools() {
 
 write_tools() {
     printf '%s' "$1" >"$TOOLS_FILE"
-    echo "Tool allowlist set to: $1"
+    if [ "$1" = "*" ]; then
+        echo "Tool allowlist set to: all tools, including extension tools"
+    else
+        echo "Tool allowlist set to: $1"
+    fi
     echo "Run: hellgate restart"
 }
 
 select_tools() {
     [ -t 0 ] || die "run 'hellgate tools select' in an interactive terminal"
     local current=",$(current_tools),"
+    if [ "$(current_tools)" = "*" ]; then
+        current=",$(IFS=,; echo "${ALL_TOOLS[*]}"),"
+    fi
     local i name mark
-    echo "Available tools:"
+    echo "Available built-in tools (extensions are included by 'a'):"
     for i in "${!ALL_TOOLS[@]}"; do
         name="${ALL_TOOLS[$i]}"
         mark=" "
@@ -166,13 +178,13 @@ select_tools() {
         printf '  %d) [%s] %s\n' "$((i + 1))" "$mark" "$name"
     done
     echo
-    echo "Enter numbers to select (comma or space separated), a = all, r = read-only, Enter = cancel."
+    echo "Enter numbers to select (comma or space separated), a = all incl. extensions, r = read-only, Enter = cancel."
     local choice
     read -r -p "> " choice || return 0
 
     case "$choice" in
     a | all)
-        write_tools "$(IFS=,; echo "${ALL_TOOLS[*]}")"
+        write_tools "*"
         return
         ;;
     r | read-only)
@@ -211,7 +223,7 @@ select_tools() {
 set_tools() {
     case "${1:-}" in
     "") show_tools ;;
-    all) write_tools "$(IFS=,; echo "${ALL_TOOLS[*]}")" ;;
+    all) write_tools "*" ;;
     read-only) write_tools "$(IFS=,; echo "${READ_ONLY_TOOLS[*]}")" ;;
     select) select_tools ;;
     reset)

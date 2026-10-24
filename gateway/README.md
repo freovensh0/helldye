@@ -35,8 +35,8 @@ HELLDYE_TOKEN=change-me ./helldye-gateway --listen 127.0.0.1:8787 --pi "$(comman
 The Termux artifact is built against Android NDK API 29, so it does not need Termux's Rust package.
 If `cargo build` in Termux fails with missing `std` rlibs, use this artifact instead of rebuilding.
 
-The installer manages this with `hellgate`. `hellgate tools all` enables
-`read,bash,edit,write,grep,find,ls`, `hellgate tools read-only` restores the safe subset, and
+The installer manages this with `hellgate`. `hellgate tools all` enables every tool, including tools
+registered by extensions (`*`); `hellgate tools read-only` restores the safe subset, and
 `hellgate tools select` opens a numbered picker. The list is stored in `~/helldye-gateway/tools`;
 `hellgate tools reset` removes it. The allowlist applies when a Pi process starts, so restart the
 gateway or resume the session afterwards.

@@ -63,7 +63,7 @@ command to update both parts.
 Pi starts read-only (`read,grep,find,ls`). To give the agent more:
 
 ```bash
-hellgate tools all          # read,bash,edit,write,grep,find,ls
+hellgate tools all          # all tools, including extension tools
 hellgate tools read-only    # back to read,grep,find,ls
 hellgate tools select       # interactive picker
 hellgate tools read,bash    # custom list
