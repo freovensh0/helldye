@@ -60,16 +60,18 @@ so later builds update over it. File managers may show the APK's uncompressed si
 about 12 MB. `pi-bolt` must already be on `PATH` (or pass `PI_BOLT=/path/to/pi-bolt`). Rerun the same
 command to update both parts.
 
-Pi starts read-only (`read,grep,find,ls`). To give the agent more, for example the Pi TUI default plus
-search tools:
+Pi starts read-only (`read,grep,find,ls`). To give the agent more:
 
 ```bash
-hellgate tools read,bash,edit,write,grep,find,ls
+hellgate tools all          # read,bash,edit,write,grep,find,ls
+hellgate tools read-only    # back to read,grep,find,ls
+hellgate tools select       # interactive picker
+hellgate tools read,bash    # custom list
 hellgate restart
 ```
 
-This gives the agent shell and write access on the gateway host. `hellgate tools reset` returns to the
-read-only set.
+This gives the agent shell and write access on the gateway host. `hellgate tools reset` clears the
+override and returns to the read-only default.
 
 ## Build
 

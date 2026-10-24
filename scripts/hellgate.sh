@@ -7,6 +7,8 @@ PID_FILE="$DIR/gateway.pid"
 LOG_FILE="$DIR/gateway.log"
 TOKEN_FILE="$HOME/.config/helldye/token"
 TOOLS_FILE="$DIR/tools"
+ALL_TOOLS=(read bash edit write grep find ls)
+READ_ONLY_TOOLS=(read grep find ls)
 LISTEN="${HELLDYE_LISTEN:-127.0.0.1:8787}"
 
 die() {
@@ -24,7 +26,10 @@ Usage: hellgate <command>
   status    show whether it is running and accepts the token
   token     print the bearer token
   tools     show the Pi tool allowlist
-  tools <list|reset>  set or reset the allowlist (needs restart)
+  tools all           enable every Android built-in
+  tools read-only     read, grep, find, ls
+  tools select        pick the allowlist interactively
+  tools reset         clear the override (read-only default)
 EOF
 }
 
@@ -124,26 +129,97 @@ show_token() {
     echo
 }
 
+current_tools() {
+    if [ -s "$TOOLS_FILE" ]; then
+        cat "$TOOLS_FILE"
+    else
+        echo "read,grep,find,ls"
+    fi
+}
+
+show_tools() {
+    if [ -s "$TOOLS_FILE" ]; then
+        cat "$TOOLS_FILE"
+        echo
+    else
+        echo "read,grep,find,ls (gateway default)"
+    fi
+}
+
+write_tools() {
+    printf '%s' "$1" >"$TOOLS_FILE"
+    echo "Tool allowlist set to: $1"
+    echo "Run: hellgate restart"
+}
+
+select_tools() {
+    [ -t 0 ] || die "run 'hellgate tools select' in an interactive terminal"
+    local current=",$(current_tools),"
+    local i name mark
+    echo "Available tools:"
+    for i in "${!ALL_TOOLS[@]}"; do
+        name="${ALL_TOOLS[$i]}"
+        mark=" "
+        case "$current" in
+        *",$name,"*) mark="x" ;;
+        esac
+        printf '  %d) [%s] %s\n' "$((i + 1))" "$mark" "$name"
+    done
+    echo
+    echo "Enter numbers to select (comma or space separated), a = all, r = read-only, Enter = cancel."
+    local choice
+    read -r -p "> " choice || return 0
+
+    case "$choice" in
+    a | all)
+        write_tools "$(IFS=,; echo "${ALL_TOOLS[*]}")"
+        return
+        ;;
+    r | read-only)
+        write_tools "$(IFS=,; echo "${READ_ONLY_TOOLS[*]}")"
+        return
+        ;;
+    "")
+        echo "Cancelled"
+        return 0
+        ;;
+    esac
+
+    local selected=() n
+    for n in $(echo "$choice" | tr ',' ' '); do
+        case "$n" in
+        "" | *[!0-9]*) continue ;;
+        esac
+        if [ "$n" -ge 1 ] && [ "$n" -le "${#ALL_TOOLS[@]}" ]; then
+            selected+=("${ALL_TOOLS[$((n - 1))]}")
+        fi
+    done
+    if [ ${#selected[@]} -eq 0 ]; then
+        die "no valid tools selected"
+    fi
+
+    local result="" tool
+    for tool in "${selected[@]}"; do
+        case ",$result," in
+        *",$tool,"*) ;;
+        *) result="${result:+$result,}$tool" ;;
+        esac
+    done
+    write_tools "$result"
+}
+
 set_tools() {
     case "${1:-}" in
-    "")
-        if [ -s "$TOOLS_FILE" ]; then
-            cat "$TOOLS_FILE"
-            echo
-        else
-            echo "read,grep,find,ls (gateway default)"
-        fi
-        ;;
+    "") show_tools ;;
+    all) write_tools "$(IFS=,; echo "${ALL_TOOLS[*]}")" ;;
+    read-only) write_tools "$(IFS=,; echo "${READ_ONLY_TOOLS[*]}")" ;;
+    select) select_tools ;;
     reset)
         rm -f "$TOOLS_FILE"
         echo "Tool allowlist reset to the gateway default: read,grep,find,ls"
         echo "Run: hellgate restart"
         ;;
-    *)
-        printf '%s' "$1" >"$TOOLS_FILE"
-        echo "Tool allowlist set to: $1"
-        echo "Run: hellgate restart"
-        ;;
+    *) write_tools "$1" ;;
     esac
 }
 
