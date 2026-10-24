@@ -23,7 +23,7 @@ The project is a clean build. It does not extend FRESKIEL.
 - stop button, queued steering messages while a turn runs, and `/compact`;
 - session picker: create, switch, rename, and delete live sessions (Pi session files persist);
 - voice input through the system speech recognizer;
-- extension UI: notifications, status entries, widgets, editor prefill, and
+- extension UI: in-app notices, status entries, widgets, editor prefill, and
   `select`/`confirm`/`input`/`editor` dialogs;
 - Pi gateway with one Pi-Bolt process per session, SSE replay, abort, multi-session support, and a
   read-only tool allowlist by default;
@@ -49,10 +49,14 @@ The script installs the latest successful `main` builds:
 - APK → `/sdcard/Download/Termux/HELLDYE.apk`;
 - bearer token → `~/.config/helldye/token` (kept across updates).
 
-It prints the gateway URL and token at the end. Enter both in HELLDYE settings, tap the APK to install,
-and manage the gateway later with `hellgate start`, `stop`, `restart`, or `status`. If the app reports
-`HTTP 401`, run `hellgate token` and paste that exact value. `pi-bolt` must already be on `PATH`
-(or pass `PI_BOLT=/path/to/pi-bolt`). Rerun the same command to update both parts.
+It prints the gateway URL, token, and the installed build SHA. Enter the URL and token in HELLDYE
+settings, tap the APK to install, and manage the gateway with `hellgate start`, `stop`, `restart`, or
+`status`. If the app reports `HTTP 401`, run `hellgate token` and paste that exact value.
+
+If Android says “app not installed”, uninstall the previous HELLDYE once: CI keeps a stable debug key,
+so later builds update over it. File managers may show the APK's uncompressed size; the file is
+about 12 MB. `pi-bolt` must already be on `PATH` (or pass `PI_BOLT=/path/to/pi-bolt`). Rerun the same
+command to update both parts.
 
 ## Build
 

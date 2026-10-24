@@ -55,6 +55,11 @@ artifact_url() {
             '[.artifacts[] | select(.name == $name and (.expired | not))][0].archive_download_url // empty'
 }
 
+run_info() {
+    api "$API/actions/runs/$1" |
+        jq -r '"\(.head_sha[0:8]) \(.created_at[0:16])"'
+}
+
 fetch() { # <run id> <artifact name> <zip> <dir>
     local url
     url=$(artifact_url "$1" "$2")
@@ -70,6 +75,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 gateway_run=$(latest_run gateway.yml)
 [ -n "$gateway_run" ] || die "no successful gateway build on $BRANCH"
+info "gateway build: $(run_info "$gateway_run")"
 fetch "$gateway_run" "$GATEWAY_ARTIFACT" "$tmp/gateway.zip" "$tmp/gateway"
 gateway_bin=$(find "$tmp/gateway" -type f -name helldye-gateway | head -n 1)
 [ -n "$gateway_bin" ] || die "gateway binary missing from the artifact"
@@ -78,6 +84,7 @@ install -m 755 "$gateway_bin" "$GATEWAY_DIR/helldye-gateway"
 
 apk_run=$(latest_run ci.yml)
 [ -n "$apk_run" ] || die "no successful Android build on $BRANCH"
+info "apk build:     $(run_info "$apk_run")"
 fetch "$apk_run" "$APK_ARTIFACT" "$tmp/apk.zip" "$tmp/apk"
 apk_file=$(find "$tmp/apk" -type f -name '*.apk' | head -n 1)
 [ -n "$apk_file" ] || die "APK missing from the artifact"
@@ -91,7 +98,10 @@ if [ ! -d /sdcard/Download ]; then
     done
 fi
 mkdir -p "$APK_DIR" || die "cannot write $APK_DIR; grant storage access with termux-setup-storage and rerun"
+rm -f "$APK_DIR/HELLDYE.apk"
 cp "$apk_file" "$APK_DIR/HELLDYE.apk"
+apk_size=$(du -h "$APK_DIR/HELLDYE.apk" | cut -f1)
+apk_hash=$(sha256sum "$APK_DIR/HELLDYE.apk" | cut -c1-12)
 
 mkdir -p "$(dirname "$TOKEN_FILE")"
 if [ -s "$TOKEN_FILE" ]; then
@@ -117,7 +127,7 @@ fi
 echo
 echo "gateway: http://$LISTEN"
 echo "token:   $TOKEN"
-echo "apk:     $APK_DIR/HELLDYE.apk"
+echo "apk:     $APK_DIR/HELLDYE.apk ($apk_size, sha256 ${apk_hash}…)"
 echo
 if [ -n "$healthy" ]; then
     echo "Gateway is up. Enter the URL and token above in HELLDYE settings,"
@@ -127,3 +137,4 @@ else
 fi
 echo "Manage it with: hellgate start|stop|restart|status"
 echo "If the app reports HTTP 401, copy the token with: hellgate token"
+echo "If Android says 'app not installed', uninstall the old HELLDYE once."
