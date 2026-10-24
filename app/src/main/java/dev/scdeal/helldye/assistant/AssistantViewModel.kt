@@ -175,17 +175,27 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             notice("Configure the Pi gateway in Settings first.")
             return
         }
-        _state.update { it.copy(thinkingPickerOpen = true) }
+        _state.update { it.copy(thinkingPickerOpen = true, capabilitiesLoading = true) }
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val gateway = ensureClient(config)
                 val session = ensureSession(gateway, config)
                 startStream(gateway, session.id)
-                refreshCapabilities(gateway, session.id, announce = true)
+                val levels = runCatching { gateway.thinkingLevels(session.id) }
+                    .getOrElse { emptyList() }
+                val sessionState = runCatching { gateway.state(session.id) }
+                _state.update {
+                    it.copy(
+                        thinkingLevels = levels.ifEmpty { FALLBACK_THINKING_LEVELS },
+                        thinkingLevel = sessionState.getOrNull()?.thinkingLevel ?: it.thinkingLevel,
+                        capabilitiesLoading = false,
+                    )
+                }
             } catch (error: Exception) {
                 _state.update {
                     it.copy(
                         thinkingPickerOpen = false,
+                        capabilitiesLoading = false,
                         error = error.message ?: "Could not load thinking levels.",
                     )
                 }
@@ -484,7 +494,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     commands = commands.getOrElse { state.commands },
                     currentModel = sessionState.getOrNull()?.model ?: state.currentModel,
                     thinkingLevel = sessionState.getOrNull()?.thinkingLevel ?: state.thinkingLevel,
-                    thinkingLevels = levels.getOrElse { state.thinkingLevels },
+                    thinkingLevels = levels.getOrElse { state.thinkingLevels }
+                        .ifEmpty { FALLBACK_THINKING_LEVELS },
                     stats = stats.getOrElse { state.stats },
                     capabilitiesLoading = false,
                     error = if (announce && models.isFailure) {
@@ -577,16 +588,6 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 pendingUserEchoes.clear()
                 _state.update { it.copy(streaming = false) }
                 refreshStats()
-                if (!payload.optBoolean("aborted") && !AppVisibility.visible) {
-                    val last = _state.value.messages
-                        .lastOrNull { it.role == ChatRole.Assistant && it.text.isNotBlank() }
-                    ExtensionNotifier.post(
-                        getApplication<Application>(),
-                        "HELLDYE finished",
-                        last?.text?.take(240).orEmpty().ifBlank { "Turn complete." },
-                        NoticeTone.Info,
-                    )
-                }
             }
             "extension_ui_request" -> handleExtensionRequest(payload)
             "message_start" -> {
@@ -740,20 +741,17 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         val timeout = payload.optLong("timeout").takeIf { it > 0 }
         when (payload.optString("method")) {
             "notify" -> {
-                val message = payload.optString("message").ifBlank { return }
+                val message = ExtensionText.clean(payload.optString("message")).ifBlank { return }
                 val tone = when (payload.optString("notifyType")) {
                     "warning" -> NoticeTone.Warning
                     "error" -> NoticeTone.Error
                     else -> NoticeTone.Info
                 }
                 _state.update { it.copy(notice = message, noticeTone = tone) }
-                if (!AppVisibility.visible) {
-                    ExtensionNotifier.post(getApplication<Application>(), "HELLDYE", message, tone)
-                }
             }
             "setStatus" -> {
                 val key = payload.optString("statusKey").ifBlank { return }
-                val text = payload.optString("statusText")
+                val text = ExtensionText.clean(payload.optString("statusText"))
                 _state.update { state ->
                     state.copy(
                         extensionStatus = if (text.isBlank()) {
@@ -769,7 +767,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 val lines = payload.optJSONArray("widgetLines")?.let { array ->
                     buildList {
                         for (index in 0 until array.length()) {
-                            array.optString(index).takeIf { it.isNotBlank() }?.let(::add)
+                            ExtensionText.clean(array.optString(index)).takeIf { it.isNotBlank() }?.let(::add)
                         }
                     }
                 }.orEmpty()
@@ -792,14 +790,14 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 val options = payload.optJSONArray("options")?.let { array ->
                     buildList {
                         for (index in 0 until array.length()) {
-                            array.optString(index).takeIf { it.isNotBlank() }?.let(::add)
+                            ExtensionText.clean(array.optString(index)).takeIf { it.isNotBlank() }?.let(::add)
                         }
                     }
                 }.orEmpty()
                 showExtensionDialog(
                     ExtensionDialog.Select(
                         id = id,
-                        title = payload.optString("title"),
+                        title = ExtensionText.clean(payload.optString("title")),
                         options = options,
                         timeoutMs = timeout,
                     ),
@@ -808,23 +806,23 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             "confirm" -> showExtensionDialog(
                 ExtensionDialog.Confirm(
                     id = id,
-                    title = payload.optString("title"),
-                    message = payload.optString("message"),
+                    title = ExtensionText.clean(payload.optString("title")),
+                    message = ExtensionText.clean(payload.optString("message")),
                     timeoutMs = timeout,
                 ),
             )
             "input" -> showExtensionDialog(
                 ExtensionDialog.Input(
                     id = id,
-                    title = payload.optString("title"),
-                    placeholder = payload.optString("placeholder"),
+                    title = ExtensionText.clean(payload.optString("title")),
+                    placeholder = ExtensionText.clean(payload.optString("placeholder")),
                     timeoutMs = timeout,
                 ),
             )
             "editor" -> showExtensionDialog(
                 ExtensionDialog.Editor(
                     id = id,
-                    title = payload.optString("title"),
+                    title = ExtensionText.clean(payload.optString("title")),
                     prefill = payload.optString("prefill"),
                     timeoutMs = timeout,
                 ),
@@ -835,14 +833,6 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     private fun showExtensionDialog(dialog: ExtensionDialog) {
         dialogTimeoutJob?.cancel()
         _state.update { it.copy(extensionDialog = dialog) }
-        if (!AppVisibility.visible) {
-            ExtensionNotifier.post(
-                getApplication<Application>(),
-                "Extension needs input",
-                dialog.title.ifBlank { "Open HELLDYE to respond." },
-                NoticeTone.Warning,
-            )
-        }
         val timeout = dialog.timeoutMs ?: return
         dialogTimeoutJob = viewModelScope.launch {
             delay(timeout)
@@ -990,3 +980,6 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         if (text.length <= 16_000) text else text.take(16_000) + "\n…"
 
 }
+
+/** Used when the gateway predates the thinking-level endpoint; Pi still validates the chosen level. */
+private val FALLBACK_THINKING_LEVELS = listOf("off", "minimal", "low", "medium", "high")

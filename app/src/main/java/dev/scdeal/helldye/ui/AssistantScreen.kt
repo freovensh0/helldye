@@ -348,13 +348,23 @@ fun AssistantScreen(
             ) {
                 ExtensionWidgets(state.extensionWidgets, above = true)
 
-                if (state.error != null || state.notice != null) {
-                    WarningBanner(
-                        text = state.error ?: state.notice.orEmpty(),
+                when {
+                    state.error != null -> WarningBanner(
+                        text = state.error,
                         action = "DISMISS",
                         onAction = onDismissNotice,
-                        signal = state.error != null || state.noticeTone != NoticeTone.Info,
                     )
+                    state.notice != null && state.noticeTone != NoticeTone.Info -> WarningBanner(
+                        text = state.notice,
+                        action = "DISMISS",
+                        onAction = onDismissNotice,
+                    )
+                    state.notice != null -> NoticeBar(
+                        text = state.notice,
+                        onDismiss = onDismissNotice,
+                    )
+                }
+                if (state.error != null || state.notice != null) {
                     Spacer(Modifier.height(HelldyeDimens.Sm))
                 }
 
@@ -833,6 +843,34 @@ private fun AttachmentAction(label: String, onClick: () -> Unit) {
 }
 
 @Composable
+private fun NoticeBar(text: String, onDismiss: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, HelldyeColors.LineSoft, RoundedCornerShape(2.dp))
+            .padding(start = HelldyeDimens.Md, top = 6.dp, bottom = 6.dp, end = HelldyeDimens.Xs),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodyMedium,
+            color = HelldyeColors.TextSecondary,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(
+            onClick = onDismiss,
+            modifier = Modifier.heightIn(min = HelldyeDimens.TouchTarget),
+        ) {
+            Text(
+                text = "DISMISS",
+                style = MaterialTheme.typography.labelSmall,
+                color = HelldyeColors.TextMuted,
+            )
+        }
+    }
+}
+
+@Composable
 private fun UsageLine(
     model: String?,
     thinking: String?,
@@ -841,16 +879,20 @@ private fun UsageLine(
 ) {
     val text = UsageSummary.text(model, thinking, stats, statuses)
     if (text.isEmpty()) return
-    Text(
-        text = text,
-        style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.5.sp),
-        color = HelldyeColors.TextMuted,
-        maxLines = 2,
-        overflow = TextOverflow.Ellipsis,
+    Row(
         modifier = Modifier
             .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
             .padding(top = HelldyeDimens.Xs, start = HelldyeDimens.Xs, end = HelldyeDimens.Xs),
-    )
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.5.sp),
+            color = HelldyeColors.TextMuted,
+            maxLines = 1,
+            softWrap = false,
+        )
+    }
 }
 
 @Composable
