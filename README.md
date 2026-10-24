@@ -24,6 +24,26 @@ The project is a clean build. It does not extend FRESKIEL.
 Pi-Bolt is the intended backend on both the PC and Termux. The Android app does not bundle Node or
 run a Pi process itself.
 
+## Install (Termux)
+
+The repository is private, so the installer needs a GitHub token with **Contents: read** and
+**Actions: read**. In Termux:
+
+```bash
+export GITHUB_TOKEN=<github-token>
+bash -c 'curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github.raw" "https://api.github.com/repos/freovensh0/helldye/contents/scripts/install-termux.sh?ref=main" | bash'
+```
+
+The script installs the latest successful `main` builds:
+
+- gateway → `~/helldye-gateway/helldye-gateway`, restarted on `127.0.0.1:8787`;
+- APK → `/sdcard/Download/Termux/HELLDYE.apk`;
+- bearer token → `~/.config/helldye/token` (kept across updates).
+
+It prints the gateway URL and token at the end. Enter both in HELLDYE settings, tap the APK to install,
+and restart the gateway later with `~/helldye-gateway/start.sh`. `pi-bolt` must already be on `PATH`
+(or pass `PI_BOLT=/path/to/pi-bolt`). Rerun the same command to update both parts.
+
 ## Build
 
 The Android build and every later build run on GitHub Actions. There is no local Android SDK on the
@@ -49,8 +69,8 @@ See `gateway/README.md` for Tailscale setup and the HTTP/SSE contract.
 1. Install the APK.
 2. Set HELLDYE as the default assistant.
 3. Open **Pi gateway → CONFIGURE** and enter the gateway URL and bearer token.
-4. Trigger the assistant from the system gesture. The overlay shows `SCREEN ON` when assist text
-   was received.
+4. Trigger the assistant from the system gesture. The overlay shows `SCREEN READY` when a screenshot
+   was captured.
 
 ## Docs
 
