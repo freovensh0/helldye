@@ -38,6 +38,25 @@ jobs:
                   yes | sdkmanager --licenses >/dev/null 2>&1 || true
                   sdkmanager "platforms;android-37.0" "build-tools;37.0.0"
 
+            - name: Restore debug keystore
+              uses: actions/cache@v6
+              with:
+                  path: ~/.android/debug.keystore
+                  key: helldye-debug-keystore-v1
+
+            - name: Create debug keystore
+              run: |
+                  mkdir -p ~/.android
+                  if [ ! -f ~/.android/debug.keystore ]; then
+                      keytool -genkeypair -v \
+                          -keystore ~/.android/debug.keystore \
+                          -storepass android \
+                          -alias androiddebugkey \
+                          -keypass android \
+                          -keyalg RSA -keysize 2048 -validity 10000 \
+                          -dname "CN=Android Debug,O=Android,C=US"
+                  fi
+
             - name: Build, test, and lint
               run: ./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug --build-cache
 
