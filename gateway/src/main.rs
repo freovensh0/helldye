@@ -221,6 +221,9 @@ async fn require_auth(
     request: axum::extract::Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    if request.uri().path() == "/health" {
+        return Ok(next.run(request).await);
+    }
     if let Some(expected) = &state.token {
         let provided = headers
             .get(axum::http::header::AUTHORIZATION)

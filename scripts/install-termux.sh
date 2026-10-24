@@ -40,7 +40,6 @@ fi
 
 PI="${PI_BOLT:-$(command -v pi-bolt || true)}"
 [ -n "$PI" ] || die "pi-bolt not found; install Pi-Bolt or set PI_BOLT=/path/to/pi-bolt"
-
 api() {
     curl -fsSL -H "Authorization: Bearer $AUTH" -H "Accept: application/vnd.github+json" "$@"
 }
@@ -103,30 +102,17 @@ else
 fi
 chmod 600 "$TOKEN_FILE"
 
-cat >"$GATEWAY_DIR/start.sh" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-export HELLDYE_TOKEN="\$(cat "$TOKEN_FILE")"
-exec "$GATEWAY_DIR/helldye-gateway" --listen "$LISTEN" --pi "$PI"
-EOF
-chmod 755 "$GATEWAY_DIR/start.sh"
+curl -fsSL -H "Authorization: Bearer $AUTH" -H "Accept: application/vnd.github.raw" \
+    "$API/contents/scripts/hellgate.sh?ref=$BRANCH" >"$PREFIX/bin/hellgate" ||
+    die "could not install hellgate"
+chmod 755 "$PREFIX/bin/hellgate"
+rm -f "$GATEWAY_DIR/start.sh"
 
 info "restarting the gateway on $LISTEN"
-if [ -f "$GATEWAY_DIR/gateway.pid" ]; then
-    kill "$(cat "$GATEWAY_DIR/gateway.pid")" 2>/dev/null || true
-    sleep 1
-fi
-nohup "$GATEWAY_DIR/start.sh" >>"$GATEWAY_DIR/gateway.log" 2>&1 &
-echo $! >"$GATEWAY_DIR/gateway.pid"
-
 healthy=""
-for _ in $(seq 1 30); do
-    if curl -fsS "http://$LISTEN/health" >/dev/null 2>&1; then
-        healthy=1
-        break
-    fi
-    sleep 0.5
-done
+if "$PREFIX/bin/hellgate" restart; then
+    healthy=1
+fi
 
 echo
 echo "gateway: http://$LISTEN"
@@ -137,6 +123,6 @@ if [ -n "$healthy" ]; then
     echo "Gateway is up. Enter the URL and token above in HELLDYE settings,"
     echo "then tap the APK in Downloads to install it."
 else
-    echo "Gateway did not answer /health yet. Log: $GATEWAY_DIR/gateway.log"
+    echo "Gateway did not start. Log: $GATEWAY_DIR/gateway.log"
 fi
-echo "Restart later with: ~/helldye-gateway/start.sh"
+echo "Manage it with: hellgate start|stop|restart|status"
