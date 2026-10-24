@@ -186,6 +186,20 @@ class GatewayClient(private val config: GatewayConfig) {
         )
     }
 
+    fun extensionResponse(
+        sessionId: String,
+        id: String,
+        value: String? = null,
+        confirmed: Boolean? = null,
+        cancelled: Boolean = false,
+    ) {
+        val body = JSONObject().put("id", id)
+        value?.let { body.put("value", it) }
+        confirmed?.let { body.put("confirmed", it) }
+        if (cancelled) body.put("cancelled", true)
+        request("POST", "/sessions/$sessionId/extension_ui_response", body)
+    }
+
     fun setModel(sessionId: String, model: GatewayModel) {
         request(
             "POST",

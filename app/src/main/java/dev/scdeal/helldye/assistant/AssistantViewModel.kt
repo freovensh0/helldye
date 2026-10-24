@@ -24,6 +24,7 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 
 class AssistantViewModel(application: Application) : AndroidViewModel(application) {
@@ -40,6 +41,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     private var activeAssistantId: String? = null
     private val toolMessages = mutableMapOf<String, String>()
     private val pendingUserEchoes = ConcurrentLinkedQueue<String>()
+    private val handledExtensionIds = ConcurrentHashMap.newKeySet<String>()
+    private var dialogTimeoutJob: Job? = null
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
@@ -170,6 +173,43 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         _state.update { it.copy(thinkingPickerOpen = false) }
     }
 
+    fun submitExtensionValue(value: String) {
+        respondExtension(value = value)
+    }
+
+    fun submitExtensionConfirm(confirmed: Boolean) {
+        respondExtension(confirmed = confirmed)
+    }
+
+    fun cancelExtension() {
+        respondExtension(cancelled = true)
+    }
+
+    fun consumeEditorPrefill() {
+        _state.update { it.copy(editorPrefill = null) }
+    }
+
+    private fun respondExtension(
+        value: String? = null,
+        confirmed: Boolean? = null,
+        cancelled: Boolean = false,
+    ) {
+        val dialog = _state.value.extensionDialog ?: return
+        val sessionId = GatewaySessionStore.sessionId ?: return
+        val gateway = client ?: return
+        dialogTimeoutJob?.cancel()
+        _state.update { it.copy(extensionDialog = null) }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                gateway.extensionResponse(sessionId, dialog.id, value, confirmed, cancelled)
+            }.onFailure { error ->
+                _state.update {
+                    it.copy(error = error.message ?: "Could not answer the extension.")
+                }
+            }
+        }
+    }
+
     fun selectThinking(level: String) {
         val sessionId = GatewaySessionStore.sessionId ?: return
         val gateway = client ?: return
@@ -288,6 +328,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         streamJob = null
         capabilitiesJob?.cancel()
         capabilitiesJob = null
+        dialogTimeoutJob?.cancel()
         // Reattach by replaying the gateway buffer; the session itself stays alive.
         GatewaySessionStore.lastEventId = null
         super.onCleared()
@@ -407,6 +448,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 _state.update { it.copy(streaming = false) }
                 refreshStats()
             }
+            "extension_ui_request" -> handleExtensionRequest(payload)
             "message_start" -> {
                 val message = payload.optJSONObject("message") ?: return
                 when (message.optString("role")) {
@@ -490,6 +532,124 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 GatewaySessionStore.reset()
                 streamJob?.cancel()
                 streamJob = null
+            }
+        }
+    }
+
+    private fun handleExtensionRequest(payload: JSONObject) {
+        val id = payload.optString("id").ifBlank { return }
+        if (!handledExtensionIds.add(id)) return
+        val timeout = payload.optLong("timeout").takeIf { it > 0 }
+        when (payload.optString("method")) {
+            "notify" -> {
+                val message = payload.optString("message").ifBlank { return }
+                val tone = when (payload.optString("notifyType")) {
+                    "warning" -> NoticeTone.Warning
+                    "error" -> NoticeTone.Error
+                    else -> NoticeTone.Info
+                }
+                _state.update { it.copy(notice = message, noticeTone = tone) }
+                if (!AppVisibility.visible) {
+                    ExtensionNotifier.post(getApplication<Application>(), "HELLDYE", message, tone)
+                }
+            }
+            "setStatus" -> {
+                val key = payload.optString("statusKey").ifBlank { return }
+                val text = payload.optString("statusText")
+                _state.update { state ->
+                    state.copy(
+                        extensionStatus = if (text.isBlank()) {
+                            state.extensionStatus - key
+                        } else {
+                            state.extensionStatus + (key to text)
+                        },
+                    )
+                }
+            }
+            "setWidget" -> {
+                val key = payload.optString("widgetKey").ifBlank { return }
+                val lines = payload.optJSONArray("widgetLines")?.let { array ->
+                    buildList {
+                        for (index in 0 until array.length()) {
+                            array.optString(index).takeIf { it.isNotBlank() }?.let(::add)
+                        }
+                    }
+                }.orEmpty()
+                val above = payload.optString("widgetPlacement", "aboveEditor") != "belowEditor"
+                _state.update { state ->
+                    state.copy(
+                        extensionWidgets = if (lines.isEmpty()) {
+                            state.extensionWidgets - key
+                        } else {
+                            state.extensionWidgets + (key to ExtensionWidget(lines, above))
+                        },
+                    )
+                }
+            }
+            "set_editor_text" -> {
+                val text = payload.optString("text")
+                if (text.isNotBlank()) _state.update { it.copy(editorPrefill = text) }
+            }
+            "select" -> {
+                val options = payload.optJSONArray("options")?.let { array ->
+                    buildList {
+                        for (index in 0 until array.length()) {
+                            array.optString(index).takeIf { it.isNotBlank() }?.let(::add)
+                        }
+                    }
+                }.orEmpty()
+                showExtensionDialog(
+                    ExtensionDialog.Select(
+                        id = id,
+                        title = payload.optString("title"),
+                        options = options,
+                        timeoutMs = timeout,
+                    ),
+                )
+            }
+            "confirm" -> showExtensionDialog(
+                ExtensionDialog.Confirm(
+                    id = id,
+                    title = payload.optString("title"),
+                    message = payload.optString("message"),
+                    timeoutMs = timeout,
+                ),
+            )
+            "input" -> showExtensionDialog(
+                ExtensionDialog.Input(
+                    id = id,
+                    title = payload.optString("title"),
+                    placeholder = payload.optString("placeholder"),
+                    timeoutMs = timeout,
+                ),
+            )
+            "editor" -> showExtensionDialog(
+                ExtensionDialog.Editor(
+                    id = id,
+                    title = payload.optString("title"),
+                    prefill = payload.optString("prefill"),
+                    timeoutMs = timeout,
+                ),
+            )
+        }
+    }
+
+    private fun showExtensionDialog(dialog: ExtensionDialog) {
+        dialogTimeoutJob?.cancel()
+        _state.update { it.copy(extensionDialog = dialog) }
+        if (!AppVisibility.visible) {
+            ExtensionNotifier.post(
+                getApplication<Application>(),
+                "Extension needs input",
+                dialog.title.ifBlank { "Open HELLDYE to respond." },
+                NoticeTone.Warning,
+            )
+        }
+        val timeout = dialog.timeoutMs ?: return
+        dialogTimeoutJob = viewModelScope.launch {
+            delay(timeout)
+            _state.update {
+                if (it.extensionDialog?.id == dialog.id) it.copy(extensionDialog = null) else it
             }
         }
     }

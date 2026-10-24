@@ -1,6 +1,8 @@
 package dev.scdeal.helldye.assistant
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
@@ -8,6 +10,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -21,6 +24,8 @@ abstract class AssistantHostActivity : ComponentActivity() {
 
     private val viewModel: AssistantViewModel by viewModels()
     private var keepDraftOnDestroy = false
+    private val notificationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge(
@@ -28,6 +33,7 @@ abstract class AssistantHostActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
         )
         super.onCreate(savedInstanceState)
+        requestNotificationPermission()
         if (!overlay) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         if (overlay && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             window.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
@@ -71,6 +77,10 @@ abstract class AssistantHostActivity : ComponentActivity() {
                     onOpenThinkingPicker = viewModel::openThinkingPicker,
                     onCloseThinkingPicker = viewModel::closeThinkingPicker,
                     onSelectThinking = viewModel::selectThinking,
+                    onExtensionValue = viewModel::submitExtensionValue,
+                    onExtensionConfirm = viewModel::submitExtensionConfirm,
+                    onExtensionCancel = viewModel::cancelExtension,
+                    onEditorPrefillConsumed = viewModel::consumeEditorPrefill,
                     onNewSession = viewModel::newSession,
                     onAbort = viewModel::abort,
                     onExpand = expandAction,
@@ -78,6 +88,29 @@ abstract class AssistantHostActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        AppVisibility.enter()
+    }
+
+    override fun onStop() {
+        AppVisibility.exit()
+        super.onStop()
+    }
+
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        val prefs = getSharedPreferences("helldye", MODE_PRIVATE)
+        if (prefs.getBoolean("notification_asked", false)) return
+        prefs.edit().putBoolean("notification_asked", true).apply()
+        notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
     override fun onDestroy() {

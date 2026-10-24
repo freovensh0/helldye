@@ -36,6 +36,19 @@ class UsageSummaryTest {
     }
 
     @Test
+    fun `extension statuses are appended`() {
+        assertEquals(
+            "SONNET  ·  THINK HIGH  ·  TURN 3 RUNNING  ·  WATCH",
+            UsageSummary.text(
+                "Sonnet",
+                "high",
+                GatewayStats(),
+                listOf("Turn 3 running", "watch", " "),
+            ),
+        )
+    }
+
+    @Test
     fun `cache line is hidden without cache reads`() {
         assertEquals(
             "SONNET  ·  1.2K TOK",

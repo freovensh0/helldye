@@ -4,7 +4,12 @@ import dev.scdeal.helldye.gateway.GatewayStats
 import java.util.Locale
 
 object UsageSummary {
-    fun text(model: String?, thinking: String?, stats: GatewayStats?): String {
+    fun text(
+        model: String?,
+        thinking: String?,
+        stats: GatewayStats?,
+        statuses: List<String> = emptyList(),
+    ): String {
         val parts = buildList {
             model?.takeIf { it.isNotBlank() }?.let { add(it.uppercase(Locale.US)) }
             thinking?.takeIf { it.isNotBlank() }?.let { add("THINK " + it.uppercase(Locale.US)) }
@@ -16,6 +21,7 @@ object UsageSummary {
                 }
                 if (stats.contextPercent >= 0) add("CTX ${stats.contextPercent}%")
             }
+            statuses.filter { it.isNotBlank() }.forEach { add(it.uppercase(Locale.US)) }
         }
         return parts.joinToString("  ·  ")
     }

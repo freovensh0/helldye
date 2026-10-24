@@ -66,6 +66,9 @@ import dev.scdeal.helldye.assistant.AssistantUiState
 import dev.scdeal.helldye.assistant.Attachment
 import dev.scdeal.helldye.assistant.ChatMessage
 import dev.scdeal.helldye.assistant.ChatRole
+import dev.scdeal.helldye.assistant.ExtensionDialog
+import dev.scdeal.helldye.assistant.ExtensionWidget
+import dev.scdeal.helldye.assistant.NoticeTone
 import dev.scdeal.helldye.assistant.SlashCommand
 import dev.scdeal.helldye.assistant.SlashCommands
 import dev.scdeal.helldye.assistant.UsageSummary
@@ -103,6 +106,10 @@ fun AssistantScreen(
     onOpenThinkingPicker: () -> Unit,
     onCloseThinkingPicker: () -> Unit,
     onSelectThinking: (String) -> Unit,
+    onExtensionValue: (String) -> Unit,
+    onExtensionConfirm: (Boolean) -> Unit,
+    onExtensionCancel: () -> Unit,
+    onEditorPrefillConsumed: () -> Unit,
     onNewSession: () -> Unit,
     onAbort: () -> Unit,
     onExpand: (() -> Unit)?,
@@ -187,6 +194,7 @@ fun AssistantScreen(
 
     BackHandler {
         when {
+            state.extensionDialog != null -> onExtensionCancel()
             state.thinkingPickerOpen -> onCloseThinkingPicker()
             state.modelPickerOpen -> onCloseModelPicker()
             attachmentMenu -> attachmentMenu = false
@@ -197,6 +205,17 @@ fun AssistantScreen(
 
     LaunchedEffect(state.messages.size) {
         if (state.messages.isNotEmpty()) listState.scrollToItem(state.messages.lastIndex)
+    }
+
+    LaunchedEffect(state.editorPrefill) {
+        state.editorPrefill?.let {
+            input = it
+            onEditorPrefillConsumed()
+        }
+    }
+
+    LaunchedEffect(state.extensionDialog?.id) {
+        if (state.extensionDialog != null) keyboard?.hide()
     }
 
     Box(
@@ -261,11 +280,14 @@ fun AssistantScreen(
                     .background(HelldyeColors.Black)
                     .padding(horizontal = HelldyeDimens.Md, vertical = HelldyeDimens.Sm),
             ) {
+                ExtensionWidgets(state.extensionWidgets, above = true)
+
                 if (state.error != null || state.notice != null) {
                     WarningBanner(
                         text = state.error ?: state.notice.orEmpty(),
                         action = "DISMISS",
                         onAction = onDismissNotice,
+                        signal = state.error != null || state.noticeTone != NoticeTone.Info,
                     )
                     Spacer(Modifier.height(HelldyeDimens.Sm))
                 }
@@ -357,7 +379,10 @@ fun AssistantScreen(
                     model = state.currentModel?.name,
                     thinking = state.thinkingLevel,
                     stats = state.stats,
+                    statuses = state.extensionStatus.values.toList(),
                 )
+
+                ExtensionWidgets(state.extensionWidgets, above = false)
             }
         }
 
@@ -379,6 +404,15 @@ fun AssistantScreen(
                 loading = state.capabilitiesLoading,
                 onSelect = onSelectThinking,
                 onClose = onCloseThinkingPicker,
+            )
+        }
+
+        state.extensionDialog?.let { dialog ->
+            ExtensionDialogCard(
+                dialog = dialog,
+                onValue = onExtensionValue,
+                onConfirm = onExtensionConfirm,
+                onCancel = onExtensionCancel,
             )
         }
     }
@@ -554,8 +588,13 @@ private fun AttachmentAction(label: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun UsageLine(model: String?, thinking: String?, stats: GatewayStats?) {
-    val text = UsageSummary.text(model, thinking, stats)
+private fun UsageLine(
+    model: String?,
+    thinking: String?,
+    stats: GatewayStats?,
+    statuses: List<String>,
+) {
+    val text = UsageSummary.text(model, thinking, stats, statuses)
     if (text.isEmpty()) return
     Text(
         text = text,
@@ -567,6 +606,30 @@ private fun UsageLine(model: String?, thinking: String?, stats: GatewayStats?) {
             .fillMaxWidth()
             .padding(top = HelldyeDimens.Xs, start = HelldyeDimens.Xs, end = HelldyeDimens.Xs),
     )
+}
+
+@Composable
+private fun ExtensionWidgets(widgets: Map<String, ExtensionWidget>, above: Boolean) {
+    val blocks = widgets.values.filter { it.above == above }
+    if (blocks.isEmpty()) return
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = HelldyeDimens.Xs)
+            .padding(top = if (above) 0.dp else HelldyeDimens.Sm),
+    ) {
+        blocks.forEach { widget ->
+            widget.lines.take(12).forEach { line ->
+                Text(
+                    text = line,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = HelldyeColors.TextMuted,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
 }
 
 @Composable
@@ -797,6 +860,118 @@ private fun ThinkingPicker(
 }
 
 @Composable
+private fun ExtensionDialogCard(
+    dialog: ExtensionDialog,
+    onValue: (String) -> Unit,
+    onConfirm: (Boolean) -> Unit,
+    onCancel: () -> Unit,
+) {
+    var text by remember(dialog.id) {
+        mutableStateOf(
+            when (dialog) {
+                is ExtensionDialog.Editor -> dialog.prefill
+                else -> ""
+            },
+        )
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.72f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(HelldyeDimens.Lg)
+                .background(HelldyeColors.Black, RoundedCornerShape(2.dp))
+                .border(1.dp, HelldyeColors.LineStrong, RoundedCornerShape(2.dp))
+                .padding(HelldyeDimens.Md),
+        ) {
+            SectionLabel("EXTENSION")
+            Spacer(Modifier.height(HelldyeDimens.Xs))
+            Text(
+                text = dialog.title.ifBlank { "Extension request" },
+                style = MaterialTheme.typography.bodyLarge,
+                color = HelldyeColors.Text,
+            )
+            Spacer(Modifier.height(HelldyeDimens.Sm))
+            when (dialog) {
+                is ExtensionDialog.Select -> {
+                    LazyColumn(modifier = Modifier.heightIn(max = 320.dp)) {
+                        items(dialog.options, key = { it }) { option ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onValue(option) }
+                                    .heightIn(min = HelldyeDimens.TouchTarget)
+                                    .padding(horizontal = HelldyeDimens.Sm),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = option,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = HelldyeColors.Text,
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(HelldyeDimens.Sm))
+                    AttachmentAction("CANCEL", onCancel)
+                }
+                is ExtensionDialog.Confirm -> {
+                    if (dialog.message.isNotBlank()) {
+                        Text(
+                            text = dialog.message,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = HelldyeColors.TextSecondary,
+                        )
+                        Spacer(Modifier.height(HelldyeDimens.Sm))
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(HelldyeDimens.Sm)) {
+                        AttachmentAction("CANCEL", onCancel)
+                        AttachmentAction("NO") { onConfirm(false) }
+                        AttachmentAction("YES") { onConfirm(true) }
+                    }
+                }
+                is ExtensionDialog.Input, is ExtensionDialog.Editor -> {
+                    val editor = dialog is ExtensionDialog.Editor
+                    BasicTextField(
+                        value = text,
+                        onValueChange = { text = it },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = if (editor) 120.dp else HelldyeDimens.TouchTarget)
+                            .border(1.dp, HelldyeColors.LineSoft, RoundedCornerShape(2.dp))
+                            .padding(HelldyeDimens.Sm),
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = HelldyeColors.Text),
+                        cursorBrush = SolidColor(HelldyeColors.White),
+                        maxLines = if (editor) 10 else 4,
+                        decorationBox = { inner ->
+                            Box {
+                                if (text.isEmpty()) {
+                                    Text(
+                                        text = (dialog as? ExtensionDialog.Input)?.placeholder.orEmpty(),
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = HelldyeColors.TextMuted,
+                                    )
+                                }
+                                inner()
+                            }
+                        },
+                    )
+                    Spacer(Modifier.height(HelldyeDimens.Sm))
+                    Row(horizontalArrangement = Arrangement.spacedBy(HelldyeDimens.Sm)) {
+                        AttachmentAction("CANCEL", onCancel)
+                        AttachmentAction("SEND") { onValue(text) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun Composer(
     input: String,
     onInputChange: (String) -> Unit,
@@ -967,6 +1142,10 @@ private fun AssistantScreenPreview() {
             onOpenThinkingPicker = {},
             onCloseThinkingPicker = {},
             onSelectThinking = {},
+            onExtensionValue = {},
+            onExtensionConfirm = {},
+            onExtensionCancel = {},
+            onEditorPrefillConsumed = {},
             onNewSession = {},
             onAbort = {},
             onExpand = {},

@@ -128,18 +128,21 @@ fun WarningBanner(
     modifier: Modifier = Modifier,
     action: String? = null,
     onAction: (() -> Unit)? = null,
+    signal: Boolean = true,
 ) {
+    val accent = if (signal) HelldyeColors.Signal else HelldyeColors.TextMuted
+    val line = if (signal) HelldyeColors.SignalLine else HelldyeColors.LineSoft
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .border(1.dp, HelldyeColors.SignalLine, RoundedCornerShape(2.dp))
+            .border(1.dp, line, RoundedCornerShape(2.dp))
             .padding(start = 12.dp, top = 8.dp, bottom = 8.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
             painter = painterResource(R.drawable.ic_warning),
             contentDescription = null,
-            tint = HelldyeColors.Signal,
+            tint = accent,
             modifier = Modifier.size(16.dp),
         )
         Spacer(Modifier.width(8.dp))
@@ -158,7 +161,7 @@ fun WarningBanner(
                 Text(
                     text = action.uppercase(Locale.ROOT),
                     style = MaterialTheme.typography.labelMedium,
-                    color = HelldyeColors.Signal,
+                    color = accent,
                 )
             }
         }

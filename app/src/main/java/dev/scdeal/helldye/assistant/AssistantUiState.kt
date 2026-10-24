@@ -47,4 +47,9 @@ data class AssistantUiState(
     val thinkingLevel: String? = null,
     val thinkingLevels: List<String> = emptyList(),
     val thinkingPickerOpen: Boolean = false,
+    val noticeTone: NoticeTone = NoticeTone.Info,
+    val extensionStatus: Map<String, String> = emptyMap(),
+    val extensionWidgets: Map<String, ExtensionWidget> = emptyMap(),
+    val extensionDialog: ExtensionDialog? = null,
+    val editorPrefill: String? = null,
 )
