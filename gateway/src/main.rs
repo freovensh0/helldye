@@ -108,6 +108,17 @@ struct SetThinking {
     level: String,
 }
 
+#[derive(Deserialize)]
+struct ExtensionUiResponse {
+    id: String,
+    #[serde(default)]
+    value: Option<String>,
+    #[serde(default)]
+    confirmed: Option<bool>,
+    #[serde(default)]
+    cancelled: Option<bool>,
+}
+
 impl Session {
     async fn publish(&self, kind: String, data: String) {
         let id = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
@@ -214,6 +225,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/v1/sessions/{id}/thinking",
             get(session_thinking).post(set_session_thinking),
+        )
+        .route(
+            "/v1/sessions/{id}/extension_ui_response",
+            post(extension_ui_response),
         )
         .with_state(state.clone())
         .layer(DefaultBodyLimit::max(12 * 1024 * 1024))
@@ -474,6 +489,26 @@ async fn set_session_thinking(
         .await
         .map_err(bad_gateway)?;
     command_data(response).map(Json)
+}
+
+async fn extension_ui_response(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<ExtensionUiResponse>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let session = lookup_owned(&state, &id).await?;
+    let mut response = json!({ "type": "extension_ui_response", "id": body.id });
+    if let Some(value) = body.value {
+        response["value"] = json!(value);
+    }
+    if let Some(confirmed) = body.confirmed {
+        response["confirmed"] = json!(confirmed);
+    }
+    if body.cancelled == Some(true) {
+        response["cancelled"] = json!(true);
+    }
+    session.send(response).await.map_err(bad_gateway)?;
+    Ok(Json(json!({ "accepted": true })))
 }
 
 async fn session_events(

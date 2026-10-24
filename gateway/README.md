@@ -88,6 +88,7 @@ All `/v1` routes require `Authorization: Bearer <token>` when a token is configu
 | `GET` | `/v1/sessions/{id}/stats` | Token, cost, cache, and context usage. |
 | `GET` | `/v1/sessions/{id}/thinking` | Thinking levels for the current model. |
 | `POST` | `/v1/sessions/{id}/thinking` | Set the thinking level (`level`). |
+| `POST` | `/v1/sessions/{id}/extension_ui_response` | Answer an extension dialog (`id`, `value`/`confirmed`/`cancelled`). |
 
 `context` is prepended to the prompt as-is. The Android client wraps screen text in
 `<screen_context>` and text files in `<file name="...">` before sending it.
