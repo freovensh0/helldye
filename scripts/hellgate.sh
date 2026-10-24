@@ -6,6 +6,7 @@ DIR="${HELLGATE_HOME:-$HOME/helldye-gateway}"
 PID_FILE="$DIR/gateway.pid"
 LOG_FILE="$DIR/gateway.log"
 TOKEN_FILE="$HOME/.config/helldye/token"
+TOOLS_FILE="$DIR/tools"
 LISTEN="${HELLDYE_LISTEN:-127.0.0.1:8787}"
 
 die() {
@@ -22,6 +23,8 @@ Usage: hellgate <command>
   restart   restart the gateway
   status    show whether it is running and accepts the token
   token     print the bearer token
+  tools     show the Pi tool allowlist
+  tools <list|reset>  set or reset the allowlist (needs restart)
 EOF
 }
 
@@ -62,6 +65,10 @@ start() {
 
     local pi="${PI_BOLT:-$(command -v pi-bolt || true)}"
     [ -n "$pi" ] || die "pi-bolt not found; install Pi-Bolt or set PI_BOLT=/path/to/pi-bolt"
+
+    if [ -s "$TOOLS_FILE" ]; then
+        export HELLDYE_TOOLS="$(cat "$TOOLS_FILE")"
+    fi
 
     HELLDYE_TOKEN="$(cat "$TOKEN_FILE")" nohup "$DIR/helldye-gateway" \
         --listen "$LISTEN" --pi "$pi" >>"$LOG_FILE" 2>&1 &
@@ -117,6 +124,29 @@ show_token() {
     echo
 }
 
+set_tools() {
+    case "${1:-}" in
+    "")
+        if [ -s "$TOOLS_FILE" ]; then
+            cat "$TOOLS_FILE"
+            echo
+        else
+            echo "read,grep,find,ls (gateway default)"
+        fi
+        ;;
+    reset)
+        rm -f "$TOOLS_FILE"
+        echo "Tool allowlist reset to the gateway default: read,grep,find,ls"
+        echo "Run: hellgate restart"
+        ;;
+    *)
+        printf '%s' "$1" >"$TOOLS_FILE"
+        echo "Tool allowlist set to: $1"
+        echo "Run: hellgate restart"
+        ;;
+    esac
+}
+
 case "${1:-}" in
 start) start ;;
 stop) stop ;;
@@ -126,6 +156,7 @@ restart)
     ;;
 status) status ;;
 token) show_token ;;
+tools) set_tools "${2:-}" ;;
 help | -h | --help) usage ;;
 *)
     usage

@@ -18,8 +18,9 @@ HELLDYE_TOKEN=change-me ./target/release/helldye-gateway \
 
 Environment equivalents: `HELLDYE_PI_BIN`, `HELLDYE_TOOLS`, `HELLDYE_TOKEN`.
 
-The default Pi binary is `pi-bolt` from `PATH`. The default tool allowlist is read-only. Each
-session starts with:
+The default Pi binary is `pi-bolt` from `PATH`. The default tool allowlist is read-only
+(`read,grep,find,ls`); Pi's own default is `read,bash,edit,write`. Override it with `--tools` or
+`HELLDYE_TOOLS`, or with `hellgate tools ...` from the Termux install.
 
 ### Termux
 
@@ -34,16 +35,13 @@ HELLDYE_TOKEN=change-me ./helldye-gateway --listen 127.0.0.1:8787 --pi "$(comman
 The Termux artifact is built against Android NDK API 29, so it does not need Termux's Rust package.
 If `cargo build` in Termux fails with missing `std` rlibs, use this artifact instead of rebuilding.
 
+The installer manages this with `hellgate`. `hellgate tools read,bash,edit,write,grep,find,ls` stores
+the allowlist in `~/helldye-gateway/tools`; `hellgate tools reset` returns to the read-only set. The
+allowlist applies when a Pi process starts, so restart the gateway or resume the session afterwards.
 
-```sh
-pi-bolt --mode rpc --no-session --tools read,grep,find,ls
-```
-
-Screen text is untrusted. Keep the read-only allowlist until you explicitly want the assistant to
-edit files or run commands.
-
-`--no-session` keeps Pi's session state inside the gateway process. The gateway is the owner; do not
-run a second writer against the same session.
+The gateway owns the Pi process for each session and starts it with `--session-id <id>`; Pi persists
+the transcript. Do not run a second writer against a live session (for example the TUI); stop the
+gateway first.
 
 ## Tailscale
 
