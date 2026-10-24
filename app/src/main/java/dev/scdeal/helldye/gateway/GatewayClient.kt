@@ -30,6 +30,20 @@ data class GatewayEvent(
     val payload: JSONObject,
 )
 
+data class GatewayModel(
+    val provider: String,
+    val id: String,
+    val name: String,
+    val reasoning: Boolean,
+    val contextWindow: Int,
+)
+
+data class GatewayCommand(
+    val name: String,
+    val description: String,
+    val source: String,
+)
+
 class GatewayException(message: String) : Exception(message)
 
 class GatewayClient(private val config: GatewayConfig) {
@@ -80,6 +94,60 @@ class GatewayClient(private val config: GatewayConfig) {
     fun abort(sessionId: String) {
         request("POST", "/sessions/$sessionId/abort", JSONObject())
     }
+
+    fun deleteSession(sessionId: String) {
+        request("DELETE", "/sessions/$sessionId")
+    }
+
+    fun models(sessionId: String): List<GatewayModel> {
+        val response = request("GET", "/sessions/$sessionId/models")
+        val array = response.optJSONArray("models") ?: JSONArray()
+        return buildList {
+            for (index in 0 until array.length()) {
+                array.optJSONObject(index)?.let { add(model(it)) }
+            }
+        }
+    }
+
+    fun commands(sessionId: String): List<GatewayCommand> {
+        val response = request("GET", "/sessions/$sessionId/commands")
+        val array = response.optJSONArray("commands") ?: JSONArray()
+        return buildList {
+            for (index in 0 until array.length()) {
+                val command = array.optJSONObject(index) ?: continue
+                add(
+                    GatewayCommand(
+                        name = command.optString("name"),
+                        description = command.optString("description"),
+                        source = command.optString("source"),
+                    ),
+                )
+            }
+        }
+    }
+
+    fun currentModel(sessionId: String): GatewayModel? {
+        val response = request("GET", "/sessions/$sessionId/state")
+        return response.optJSONObject("model")?.let(::model)
+    }
+
+    fun setModel(sessionId: String, model: GatewayModel) {
+        request(
+            "POST",
+            "/sessions/$sessionId/model",
+            JSONObject()
+                .put("provider", model.provider)
+                .put("modelId", model.id),
+        )
+    }
+
+    private fun model(json: JSONObject): GatewayModel = GatewayModel(
+        provider = json.optString("provider"),
+        id = json.optString("id"),
+        name = json.optString("name").ifBlank { json.optString("id") },
+        reasoning = json.optBoolean("reasoning"),
+        contextWindow = json.optInt("contextWindow"),
+    )
 
     fun events(sessionId: String, lastEventId: String?): Flow<GatewayEvent> = callbackFlow {
         val connection = openConnection("/sessions/$sessionId/events", "GET").apply {
@@ -163,7 +231,7 @@ class GatewayClient(private val config: GatewayConfig) {
         val connection = URL(apiBase + path).openConnection() as HttpURLConnection
         connection.requestMethod = method
         connection.connectTimeout = 8_000
-        connection.readTimeout = 15_000
+        connection.readTimeout = 30_000
         connection.setRequestProperty("Accept", "application/json")
         connection.setRequestProperty("User-Agent", "HELLDYE/${Build.VERSION.SDK_INT}")
         if (config.token.isNotBlank()) {

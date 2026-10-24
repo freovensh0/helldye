@@ -21,6 +21,20 @@ Environment equivalents: `HELLDYE_PI_BIN`, `HELLDYE_TOOLS`, `HELLDYE_TOKEN`.
 The default Pi binary is `pi-bolt` from `PATH`. The default tool allowlist is read-only. Each
 session starts with:
 
+### Termux
+
+The `gateway` workflow publishes `helldye-gateway-termux-arm64`. Download the artifact from the
+latest successful run, unpack it, then:
+
+```sh
+chmod +x helldye-gateway
+HELLDYE_TOKEN=change-me ./helldye-gateway --listen 127.0.0.1:8787 --pi "$(command -v pi-bolt)"
+```
+
+The Termux artifact is built against Android NDK API 29, so it does not need Termux's Rust package.
+If `cargo build` in Termux fails with missing `std` rlibs, use this artifact instead of rebuilding.
+
+
 ```sh
 pi-bolt --mode rpc --no-session --tools read,grep,find,ls
 ```
@@ -67,6 +81,10 @@ All `/v1` routes require `Authorization: Bearer <token>` when a token is configu
 | `GET` | `/v1/sessions/{id}/events` | SSE stream; supports `Last-Event-ID`. |
 | `POST` | `/v1/sessions/{id}/prompt` | Send `message`, optional `context`, optional `images`. |
 | `POST` | `/v1/sessions/{id}/abort` | Abort the active turn. |
+| `GET` | `/v1/sessions/{id}/models` | Models configured in Pi. |
+| `GET` | `/v1/sessions/{id}/commands` | Prompt templates, skills, and extension commands. |
+| `GET` | `/v1/sessions/{id}/state` | Current model, thinking level, and session state. |
+| `POST` | `/v1/sessions/{id}/model` | Switch model (`provider`, `modelId`). |
 
 `context` is prepended to the prompt as-is. The Android client wraps screen text in
 `<screen_context>` and text files in `<file name="...">` before sending it.

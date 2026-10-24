@@ -1,5 +1,8 @@
 package dev.scdeal.helldye.assistant
 
+import dev.scdeal.helldye.gateway.GatewayCommand
+import dev.scdeal.helldye.gateway.GatewayModel
+
 enum class ChatRole { User, Assistant, Tool }
 
 data class ChatMessage(
@@ -25,10 +28,6 @@ sealed interface Attachment {
     ) : Attachment {
         override val label: String = name
     }
-
-    data class Screen(val content: String) : Attachment {
-        override val label: String = "SCREEN"
-    }
 }
 
 data class AssistantUiState(
@@ -38,4 +37,9 @@ data class AssistantUiState(
     val notice: String? = null,
     val error: String? = null,
     val sessionId: String? = null,
+    val models: List<GatewayModel> = emptyList(),
+    val commands: List<GatewayCommand> = emptyList(),
+    val currentModel: GatewayModel? = null,
+    val modelPickerOpen: Boolean = false,
+    val capabilitiesLoading: Boolean = false,
 )

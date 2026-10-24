@@ -36,3 +36,38 @@ jobs:
             - name: Check and test
               working-directory: gateway
               run: cargo test --locked
+
+    termux:
+        name: Termux arm64 binary
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+        steps:
+            - uses: actions/checkout@v7
+
+            - uses: android-actions/setup-android@v4
+
+            - name: Install NDK
+              run: |
+                  sdkmanager "ndk;27.2.12479018"
+                  echo "NDK=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  targets: aarch64-linux-android
+
+            - uses: Swatinem/rust-cache@v2
+              with:
+                  workspaces: gateway
+
+            - name: Build Termux binary
+              working-directory: gateway
+              run: |
+                  export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang"
+                  cargo build --release --locked --target aarch64-linux-android
+
+            - name: Upload Termux binary
+              uses: actions/upload-artifact@v7
+              with:
+                  name: helldye-gateway-termux-arm64
+                  path: gateway/target/aarch64-linux-android/release/helldye-gateway
+                  if-no-files-found: error
