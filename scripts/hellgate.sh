@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# Controls the HELLDYE gateway installed by scripts/install-termux.sh.
+set -euo pipefail
+
+DIR="${HELLGATE_HOME:-$HOME/helldye-gateway}"
+PID_FILE="$DIR/gateway.pid"
+LOG_FILE="$DIR/gateway.log"
+TOKEN_FILE="$HOME/.config/helldye/token"
+LISTEN="${HELLDYE_LISTEN:-127.0.0.1:8787}"
+
+die() {
+    echo "error: $*" >&2
+    exit 1
+}
+
+usage() {
+    cat <<'EOF'
+Usage: hellgate <command>
+
+  start     start the gateway in the background
+  stop      stop the gateway
+  restart   restart the gateway
+  status    show whether it is running
+EOF
+}
+
+pid() {
+    [ -s "$PID_FILE" ] || return 1
+    cat "$PID_FILE"
+}
+
+is_running() {
+    local p
+    p=$(pid) || return 1
+    [ -n "$p" ] && kill -0 "$p" 2>/dev/null
+}
+
+wait_health() {
+    local token="" i
+    [ -s "$TOKEN_FILE" ] && token=$(cat "$TOKEN_FILE")
+    for i in $(seq 1 40); do
+        if curl -fsS -H "Authorization: Bearer $token" "http://$LISTEN/health" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    return 1
+}
+
+start() {
+    [ -x "$DIR/helldye-gateway" ] || die "not installed; run the HELLDYE installer first"
+    [ -s "$TOKEN_FILE" ] || die "missing $TOKEN_FILE; run the HELLDYE installer first"
+
+    if is_running; then
+        echo "hellgate already running (pid $(pid)) on http://$LISTEN"
+        return 0
+    fi
+
+    local pi="${PI_BOLT:-$(command -v pi-bolt || true)}"
+    [ -n "$pi" ] || die "pi-bolt not found; install Pi-Bolt or set PI_BOLT=/path/to/pi-bolt"
+
+    HELLDYE_TOKEN="$(cat "$TOKEN_FILE")" nohup "$DIR/helldye-gateway" \
+        --listen "$LISTEN" --pi "$pi" >>"$LOG_FILE" 2>&1 &
+    echo $! >"$PID_FILE"
+
+    if wait_health && is_running; then
+        echo "hellgate running on http://$LISTEN (pid $(cat "$PID_FILE"))"
+    else
+        echo "hellgate did not answer /health; last log lines:" >&2
+        tail -n 5 "$LOG_FILE" >&2 || true
+        return 1
+    fi
+}
+
+stop() {
+    if ! is_running; then
+        rm -f "$PID_FILE"
+        echo "hellgate is not running"
+        return 0
+    fi
+
+    local p
+    p=$(cat "$PID_FILE")
+    kill "$p" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+        is_running || break
+        sleep 0.2
+    done
+    if is_running; then
+        kill -9 "$p" 2>/dev/null || true
+    fi
+    rm -f "$PID_FILE"
+    echo "hellgate stopped"
+}
+
+status() {
+    if is_running; then
+        echo "hellgate running on http://$LISTEN (pid $(pid))"
+    else
+        echo "hellgate stopped"
+        return 1
+    fi
+}
+
+case "${1:-}" in
+start) start ;;
+stop) stop ;;
+restart)
+    stop
+    start
+    ;;
+status) status ;;
+help | -h | --help) usage ;;
+*)
+    usage
+    exit 2
+    ;;
+esac

@@ -41,8 +41,8 @@ The script installs the latest successful `main` builds:
 - bearer token → `~/.config/helldye/token` (kept across updates).
 
 It prints the gateway URL and token at the end. Enter both in HELLDYE settings, tap the APK to install,
-and restart the gateway later with `~/helldye-gateway/start.sh`. `pi-bolt` must already be on `PATH`
-(or pass `PI_BOLT=/path/to/pi-bolt`). Rerun the same command to update both parts.
+and manage the gateway later with `hellgate start`, `stop`, `restart`, or `status`. `pi-bolt` must
+already be on `PATH` (or pass `PI_BOLT=/path/to/pi-bolt`). Rerun the same command to update both parts.
 
 ## Build
 
