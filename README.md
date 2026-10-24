@@ -18,17 +18,19 @@ The project is a clean build. It does not extend FRESKIEL.
   templates and skills;
 - model and thinking pickers backed by Pi's available models and session state;
 - Pi-style usage line under the composer: model, thinking, tokens, cost, cache hit, and context;
-- markdown and code rendering, streaming thinking blocks, and collapsible tool cards with
-  arguments, results, and durations;
+- markdown rendering: headings, lists, todo items, tables, links, bold/italic/strike, inline code,
+  and fenced code blocks; streaming thinking blocks; collapsible tool cards with arguments,
+  results, and durations;
 - stop button, queued steering messages while a turn runs, and `/compact`;
-- session picker: create, switch, rename, and delete live sessions (Pi session files persist);
+- session picker: create, switch, rename, and delete persisted sessions; stopped sessions resume
+  from their Pi transcript after a gateway restart;
 - voice input through the system speech recognizer;
 - extension UI: in-app notices, status entries, widgets, editor prefill, and
   `select`/`confirm`/`input`/`editor` dialogs;
 - Pi gateway with one Pi-Bolt process per session, SSE replay, abort, multi-session support, and a
   read-only tool allowlist by default;
 - gateway URL/token/workspace settings in the app;
-- still missing: multiple gateway hosts, session resume after a gateway restart, fork/export/share.
+- still missing: multiple gateway hosts, fork/export/share, PDF/DOCX and assistant media previews.
 
 Pi-Bolt is the intended backend on both the PC and Termux. The Android app does not bundle Node or
 run a Pi process itself.

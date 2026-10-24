@@ -53,9 +53,15 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 val sessionId = GatewaySessionStore.sessionId ?: return@launch
                 val gateway = GatewayClient(config)
                 client = gateway
+                val info = runCatching { gateway.session(sessionId) }
+                if (info.isFailure) {
+                    val message = info.exceptionOrNull()?.message.orEmpty()
+                    if (message.contains("HTTP 404")) GatewaySessionStore.reset()
+                    _state.update { it.copy(error = message.ifBlank { "Could not open the session." }) }
+                    return@launch
+                }
                 _state.update { it.copy(sessionId = sessionId) }
-                startStream(gateway, sessionId)
-                refreshCapabilities(gateway, sessionId, announce = false)
+                attach(gateway, sessionId, info.getOrNull()?.status)
             }
         }
     }
@@ -382,8 +388,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
                 val gateway = ensureClient(config)
-                startStream(gateway, sessionId)
-                refreshCapabilities(gateway, sessionId, announce = false)
+                val info = gateway.session(sessionId)
+                attach(gateway, sessionId, info.status)
             }.onFailure { error ->
                 _state.update {
                     it.copy(error = error.message ?: "Could not open the session.")
@@ -551,12 +557,22 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         return session
     }
 
-    private fun startStream(gateway: GatewayClient, sessionId: String) {
+    private fun startStream(
+        gateway: GatewayClient,
+        sessionId: String,
+        skipReplay: Boolean = false,
+    ) {
         if (streamJob?.isActive == true) return
         streamJob = viewModelScope.launch(Dispatchers.IO) {
+            var skip = skipReplay
             while (isActive) {
                 try {
-                    gateway.events(sessionId, GatewaySessionStore.lastEventId).collect { event ->
+                    gateway.events(
+                        sessionId,
+                        GatewaySessionStore.lastEventId,
+                        replay = !skip,
+                    ).collect { event ->
+                        skip = false
                         event.id?.let { GatewaySessionStore.lastEventId = it }
                         handleEvent(event)
                     }
@@ -577,6 +593,80 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 }
             }
         }
+    }
+
+    private fun attach(gateway: GatewayClient, sessionId: String, status: String?) {
+        if (status == "stopped") {
+            runCatching { gateway.messages(sessionId) }.onSuccess { restoreMessages(it) }
+            startStream(gateway, sessionId, skipReplay = true)
+        } else {
+            startStream(gateway, sessionId)
+        }
+        refreshCapabilities(gateway, sessionId, announce = false)
+    }
+
+    private fun restoreMessages(messages: JSONArray) {
+        val restored = mutableListOf<ChatMessage>()
+        val tools = mutableMapOf<String, Int>()
+        for (index in 0 until messages.length()) {
+            val message = messages.optJSONObject(index) ?: continue
+            when (message.optString("role")) {
+                "user" -> {
+                    val text = UserMessageText.clean(messageText(message))
+                    if (text.isNotBlank()) {
+                        restored += ChatMessage(
+                            UUID.randomUUID().toString(),
+                            ChatRole.User,
+                            text,
+                        )
+                    }
+                }
+                "assistant" -> {
+                    val text = messageText(message)
+                    val thinking = messageThinking(message)
+                    if (text.isNotBlank() || thinking.isNotBlank()) {
+                        restored += ChatMessage(
+                            UUID.randomUUID().toString(),
+                            ChatRole.Assistant,
+                            text,
+                            thinking,
+                        )
+                    }
+                    val content = message.optJSONArray("content") ?: continue
+                    for (blockIndex in 0 until content.length()) {
+                        val block = content.optJSONObject(blockIndex) ?: continue
+                        if (block.optString("type") != "toolCall") continue
+                        val callId = block.optString("id")
+                        if (callId.isBlank()) continue
+                        val name = block.optString("name")
+                        tools[callId] = restored.size
+                        restored += ChatMessage(
+                            id = "tool-$callId",
+                            role = ChatRole.Tool,
+                            text = name,
+                            tool = ToolInfo(
+                                name = name,
+                                args = clip(block.optJSONObject("arguments")?.toString(2).orEmpty()),
+                            ),
+                        )
+                    }
+                }
+                "toolResult" -> {
+                    val callId = message.optString("toolCallId")
+                    val at = tools[callId] ?: continue
+                    val tool = restored[at].tool ?: continue
+                    restored[at] = restored[at].copy(
+                        tool = tool.copy(
+                            result = clip(toolResultText(message)),
+                            running = false,
+                            failed = message.optBoolean("isError"),
+                        ),
+                    )
+                }
+            }
+        }
+        activeAssistantId = null
+        _state.update { it.copy(messages = restored) }
     }
 
     private fun handleEvent(event: GatewayEvent) {

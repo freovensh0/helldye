@@ -8,11 +8,12 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{
@@ -42,6 +43,7 @@ struct AppState {
     tools: String,
     token: Option<String>,
     sessions: Arc<RwLock<HashMap<String, Arc<Session>>>>,
+    state_file: PathBuf,
 }
 
 struct Session {
@@ -49,12 +51,14 @@ struct Session {
     name: RwLock<String>,
     cwd: String,
     stdin: Mutex<Option<ChildStdin>>,
+    start: Mutex<()>,
     seq: AtomicU64,
     streaming: AtomicBool,
     events: Mutex<VecDeque<WireEvent>>,
     tx: broadcast::Sender<WireEvent>,
     pending: Mutex<HashMap<String, oneshot::Sender<Value>>>,
     status: Mutex<String>,
+    created: u64,
 }
 
 #[derive(Clone)]
@@ -70,6 +74,26 @@ struct SessionInfo {
     name: String,
     cwd: String,
     status: String,
+    created: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredSession {
+    id: String,
+    name: String,
+    cwd: String,
+    #[serde(default)]
+    created: u64,
+}
+
+#[derive(Deserialize)]
+struct EventsQuery {
+    #[serde(default = "default_replay")]
+    replay: bool,
+}
+
+fn default_replay() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -176,6 +200,7 @@ impl Session {
             name: self.name.read().await.clone(),
             cwd: self.cwd.clone(),
             status: self.status.lock().await.clone(),
+            created: self.created,
         }
     }
 }
@@ -207,11 +232,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let state_file = env::var("HELLDYE_STATE_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = env::var("HOME").unwrap_or_else(|_| ".".into());
+            PathBuf::from(home).join(".local/share/helldye/sessions.json")
+        });
+    let mut restored = HashMap::new();
+    if let Ok(bytes) = tokio::fs::read(&state_file).await {
+        if let Ok(items) = serde_json::from_slice::<Vec<StoredSession>>(&bytes) {
+            for item in items {
+                let session =
+                    new_session(item.id, item.name, PathBuf::from(item.cwd), item.created);
+                restored.insert(session.id.clone(), session);
+            }
+        }
+    }
+
     let state = AppState {
         pi_bin,
         tools,
         token,
-        sessions: Arc::new(RwLock::new(HashMap::new())),
+        sessions: Arc::new(RwLock::new(restored)),
+        state_file,
     };
 
     let app = Router::new()
@@ -220,6 +263,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/sessions", get(list_sessions).post(create_session))
         .route("/v1/sessions/{id}", get(get_session).delete(delete_session))
         .route("/v1/sessions/{id}/events", get(session_events))
+        .route("/v1/sessions/{id}/messages", get(session_messages))
         .route("/v1/sessions/{id}/prompt", post(prompt))
         .route("/v1/sessions/{id}/abort", post(abort))
         .route("/v1/sessions/{id}/compact", post(compact))
@@ -288,6 +332,7 @@ async fn list_sessions(State(state): State<AppState>) -> impl IntoResponse {
     for session in sessions.values() {
         values.push(session.info().await);
     }
+    values.sort_by(|left, right| right.created.cmp(&left.created));
     Json(values)
 }
 
@@ -308,11 +353,10 @@ async fn create_session(
 
     let id = Uuid::new_v4().to_string();
     let name = body.name.unwrap_or_else(|| id[..8].to_string());
-    let session = spawn_session(&state.pi_bin, &state.tools, id.clone(), name, cwd)
-        .await
-        .map_err(|error| (StatusCode::BAD_GATEWAY, error))?;
+    let session = new_session(id.clone(), name, cwd, now_epoch());
     let info = session.info().await;
     state.sessions.write().await.insert(id, session);
+    persist_sessions(&state).await;
     Ok(Json(info))
 }
 
@@ -335,6 +379,7 @@ async fn delete_session(
         .remove(&id)
         .ok_or(StatusCode::NOT_FOUND)?;
     session.stdin.lock().await.take();
+    persist_sessions(&state).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -346,6 +391,9 @@ async fn prompt(
     let session = lookup(&state, &id)
         .await
         .map_err(|status| (status, "not found".into()))?;
+    ensure_started(&state, &session)
+        .await
+        .map_err(bad_gateway)?;
     if body.message.trim().is_empty() && body.images.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "message is empty".into()));
     }
@@ -386,6 +434,9 @@ async fn abort(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, StatusCode> {
     let session = lookup(&state, &id).await?;
+    ensure_started(&state, &session)
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
     session
         .send(json!({ "type": "abort" }))
         .await
@@ -398,6 +449,9 @@ async fn compact(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, StatusCode> {
     let session = lookup(&state, &id).await?;
+    ensure_started(&state, &session)
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
     session
         .send(json!({ "type": "compact" }))
         .await
@@ -415,15 +469,18 @@ async fn rename_session(
         return Err((StatusCode::BAD_REQUEST, "name is empty".into()));
     }
     let session = lookup_owned(&state, &id).await?;
-    let response = session
-        .request(
-            json!({ "type": "set_session_name", "name": name }),
-            Duration::from_secs(10),
-        )
-        .await
-        .map_err(bad_gateway)?;
-    command_data(response)?;
+    if session.stdin.lock().await.is_some() {
+        let response = session
+            .request(
+                json!({ "type": "set_session_name", "name": name }),
+                Duration::from_secs(10),
+            )
+            .await
+            .map_err(bad_gateway)?;
+        command_data(response)?;
+    }
     *session.name.write().await = name;
+    persist_sessions(&state).await;
     Ok(Json(session.info().await))
 }
 
@@ -431,7 +488,7 @@ async fn session_models(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let session = lookup_owned(&state, &id).await?;
+    let session = lookup_started(&state, &id).await?;
     let response = session
         .request(
             json!({ "type": "get_available_models" }),
@@ -446,7 +503,7 @@ async fn session_commands(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let session = lookup_owned(&state, &id).await?;
+    let session = lookup_started(&state, &id).await?;
     let response = session
         .request(json!({ "type": "get_commands" }), Duration::from_secs(10))
         .await
@@ -458,7 +515,7 @@ async fn session_state(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let session = lookup_owned(&state, &id).await?;
+    let session = lookup_started(&state, &id).await?;
     let response = session
         .request(json!({ "type": "get_state" }), Duration::from_secs(10))
         .await
@@ -471,7 +528,7 @@ async fn set_session_model(
     Path(id): Path<String>,
     Json(body): Json<SetModel>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let session = lookup_owned(&state, &id).await?;
+    let session = lookup_started(&state, &id).await?;
     let response = session
         .request(
             json!({
@@ -490,7 +547,7 @@ async fn session_stats(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let session = lookup_owned(&state, &id).await?;
+    let session = lookup_started(&state, &id).await?;
     let response = session
         .request(
             json!({ "type": "get_session_stats" }),
@@ -505,7 +562,7 @@ async fn session_thinking(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let session = lookup_owned(&state, &id).await?;
+    let session = lookup_started(&state, &id).await?;
     let response = session
         .request(
             json!({ "type": "get_available_thinking_levels" }),
@@ -521,7 +578,7 @@ async fn set_session_thinking(
     Path(id): Path<String>,
     Json(body): Json<SetThinking>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let session = lookup_owned(&state, &id).await?;
+    let session = lookup_started(&state, &id).await?;
     let response = session
         .request(
             json!({ "type": "set_thinking_level", "level": body.level }),
@@ -537,7 +594,7 @@ async fn extension_ui_response(
     Path(id): Path<String>,
     Json(body): Json<ExtensionUiResponse>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let session = lookup_owned(&state, &id).await?;
+    let session = lookup_started(&state, &id).await?;
     let mut response = json!({ "type": "extension_ui_response", "id": body.id });
     if let Some(value) = body.value {
         response["value"] = json!(value);
@@ -555,14 +612,22 @@ async fn extension_ui_response(
 async fn session_events(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<EventsQuery>,
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, StatusCode> {
     let session = lookup(&state, &id).await?;
-    let last = headers
-        .get("last-event-id")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(0);
+    ensure_started(&state, &session)
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let last = if query.replay {
+        headers
+            .get("last-event-id")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+    } else {
+        session.seq.load(Ordering::SeqCst)
+    };
 
     let (tx, rx) = mpsc::channel(256);
     tokio::spawn(async move {
@@ -604,10 +669,28 @@ async fn session_events(
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 
+async fn session_messages(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let session = lookup_started(&state, &id).await?;
+    let response = session
+        .request(json!({ "type": "get_messages" }), Duration::from_secs(15))
+        .await
+        .map_err(bad_gateway)?;
+    command_data(response).map(Json)
+}
+
 async fn lookup_owned(state: &AppState, id: &str) -> Result<Arc<Session>, (StatusCode, String)> {
     lookup(state, id)
         .await
         .map_err(|status| (status, "session not found".to_string()))
+}
+
+async fn lookup_started(state: &AppState, id: &str) -> Result<Arc<Session>, (StatusCode, String)> {
+    let session = lookup_owned(state, id).await?;
+    ensure_started(state, &session).await.map_err(bad_gateway)?;
+    Ok(session)
 }
 
 fn command_data(response: Value) -> Result<Value, (StatusCode, String)> {
@@ -639,52 +722,68 @@ async fn lookup(state: &AppState, id: &str) -> Result<Arc<Session>, StatusCode> 
         .ok_or(StatusCode::NOT_FOUND)
 }
 
-async fn spawn_session(
-    pi_bin: &str,
-    tools: &str,
-    id: String,
-    name: String,
-    cwd: PathBuf,
-) -> Result<Arc<Session>, String> {
-    let mut child = Command::new(pi_bin)
-        .arg("--mode")
-        .arg("rpc")
-        .arg("--session-id")
-        .arg(&id)
-        .arg("--name")
-        .arg(&name)
-        .arg("--tools")
-        .arg(tools)
-        .current_dir(&cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("failed to start {pi_bin}: {error}"))?;
+fn now_epoch() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
 
-    let stdin = child.stdin.take().ok_or("pi stdin is unavailable")?;
-    let stdout = child.stdout.take().ok_or("pi stdout is unavailable")?;
-    let stderr = child.stderr.take().ok_or("pi stderr is unavailable")?;
+fn new_session(id: String, name: String, cwd: PathBuf, created: u64) -> Arc<Session> {
     let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
-    let session = Arc::new(Session {
+    Arc::new(Session {
         id,
         name: RwLock::new(name),
         cwd: cwd.to_string_lossy().into_owned(),
-        stdin: Mutex::new(Some(stdin)),
+        stdin: Mutex::new(None),
+        start: Mutex::new(()),
         seq: AtomicU64::new(0),
         streaming: AtomicBool::new(false),
         events: Mutex::new(VecDeque::new()),
         tx,
         pending: Mutex::new(HashMap::new()),
-        status: Mutex::new("running".into()),
-    });
+        status: Mutex::new("stopped".into()),
+        created,
+    })
+}
+
+async fn ensure_started(state: &AppState, session: &Arc<Session>) -> Result<(), String> {
+    let _guard = session.start.lock().await;
+    if session.stdin.lock().await.is_some() {
+        return Ok(());
+    }
+    let name = session.name.read().await.clone();
+    let mut child = Command::new(&state.pi_bin)
+        .arg("--mode")
+        .arg("rpc")
+        .arg("--session-id")
+        .arg(&session.id)
+        .arg("--name")
+        .arg(&name)
+        .arg("--tools")
+        .arg(&state.tools)
+        .current_dir(&session.cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("failed to start {}: {error}", state.pi_bin))?;
+
+    let stdin = child.stdin.take().ok_or("pi stdin is unavailable")?;
+    let stdout = child.stdout.take().ok_or("pi stdout is unavailable")?;
+    let stderr = child.stderr.take().ok_or("pi stderr is unavailable")?;
+    session.events.lock().await.clear();
+    session.pending.lock().await.clear();
+    *session.stdin.lock().await = Some(stdin);
+    *session.status.lock().await = "running".into();
 
     tokio::spawn(read_stdout(session.clone(), stdout));
     tokio::spawn(read_stderr(stderr));
     let watcher = session.clone();
     tokio::spawn(async move {
         let _ = child.wait().await;
-        *watcher.status.lock().await = "exited".into();
+        *watcher.stdin.lock().await = None;
+        *watcher.status.lock().await = "stopped".into();
         watcher
             .publish(
                 "gateway_exit".into(),
@@ -692,7 +791,29 @@ async fn spawn_session(
             )
             .await;
     });
-    Ok(session)
+    Ok(())
+}
+
+async fn persist_sessions(state: &AppState) {
+    let sessions = state.sessions.read().await;
+    let mut stored = Vec::with_capacity(sessions.len());
+    for session in sessions.values() {
+        stored.push(StoredSession {
+            id: session.id.clone(),
+            name: session.name.read().await.clone(),
+            cwd: session.cwd.clone(),
+            created: session.created,
+        });
+    }
+    drop(sessions);
+    stored.sort_by(|left, right| right.created.cmp(&left.created));
+    let Ok(bytes) = serde_json::to_vec_pretty(&stored) else {
+        return;
+    };
+    if let Some(dir) = state.state_file.parent() {
+        let _ = tokio::fs::create_dir_all(dir).await;
+    }
+    let _ = tokio::fs::write(&state.state_file, bytes).await;
 }
 
 async fn read_stdout(session: Arc<Session>, stdout: tokio::process::ChildStdout) {

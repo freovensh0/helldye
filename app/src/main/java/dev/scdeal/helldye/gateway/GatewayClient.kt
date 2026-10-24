@@ -17,6 +17,7 @@ data class GatewaySession(
     val name: String,
     val cwd: String,
     val status: String,
+    val created: Long = 0,
 )
 
 data class GatewayImage(
@@ -80,6 +81,7 @@ class GatewayClient(private val config: GatewayConfig) {
             name = response.optString("name"),
             cwd = response.optString("cwd"),
             status = response.optString("status"),
+            created = response.optLong("created"),
         )
     }
 
@@ -132,10 +134,27 @@ class GatewayClient(private val config: GatewayConfig) {
                         name = session.optString("name"),
                         cwd = session.optString("cwd"),
                         status = session.optString("status"),
+                        created = session.optLong("created"),
                     ),
                 )
             }
         }
+    }
+
+    fun session(sessionId: String): GatewaySession {
+        val response = request("GET", "/sessions/$sessionId")
+        return GatewaySession(
+            id = response.optString("id", sessionId),
+            name = response.optString("name"),
+            cwd = response.optString("cwd"),
+            status = response.optString("status"),
+            created = response.optLong("created"),
+        )
+    }
+
+    fun messages(sessionId: String): JSONArray {
+        val response = request("GET", "/sessions/$sessionId/messages")
+        return response.optJSONArray("messages") ?: JSONArray()
     }
 
     fun renameSession(sessionId: String, name: String): GatewaySession {
@@ -149,6 +168,7 @@ class GatewayClient(private val config: GatewayConfig) {
             name = response.optString("name", name),
             cwd = response.optString("cwd"),
             status = response.optString("status"),
+            created = response.optLong("created"),
         )
     }
 
@@ -254,8 +274,9 @@ class GatewayClient(private val config: GatewayConfig) {
         contextWindow = json.optInt("contextWindow"),
     )
 
-    fun events(sessionId: String, lastEventId: String?): Flow<GatewayEvent> = callbackFlow {
-        val connection = openConnection("/sessions/$sessionId/events", "GET").apply {
+    fun events(sessionId: String, lastEventId: String?, replay: Boolean = true): Flow<GatewayEvent> = callbackFlow {
+        val path = "/sessions/$sessionId/events" + if (replay) "" else "?replay=false"
+        val connection = openConnection(path, "GET").apply {
             readTimeout = 0
             setRequestProperty("Accept", "text/event-stream")
             if (!lastEventId.isNullOrBlank()) setRequestProperty("Last-Event-ID", lastEventId)

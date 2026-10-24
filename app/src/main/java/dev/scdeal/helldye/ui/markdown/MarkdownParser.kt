@@ -13,15 +13,23 @@ sealed interface MarkdownBlock {
 
     data class Quote(val text: String) : MarkdownBlock
 
+    data class Todo(val items: List<TodoItem>) : MarkdownBlock
+
+    data class Table(val header: List<String>, val rows: List<List<String>>) : MarkdownBlock
+
     data object Divider : MarkdownBlock
 }
+
+data class TodoItem(val text: String, val checked: Boolean)
 
 /** Minimal block parser for assistant output: fenced code, headings, lists, quotes, rules. */
 object MarkdownParser {
     private val heading = Regex("^(#{1,6})\\s+(.*)$")
     private val bullet = Regex("^[-*+]\\s+(.*)$")
+    private val todoItem = Regex("^[-*+]\\s+\\[([xX ])]\\s+(.*)$")
     private val numbered = Regex("^\\d+[.)]\\s+(.*)$")
     private val divider = Regex("^(-{3,}|\\*{3,}|_{3,})$")
+    private val tableSeparator = Regex("^\\|?\\s*:?-{3,}:?\\s*(\\|\\s*:?-{3,}:?\\s*)+\\|?$")
 
     fun parse(text: String): List<MarkdownBlock> {
         val blocks = mutableListOf<MarkdownBlock>()
@@ -65,6 +73,33 @@ object MarkdownParser {
                 continue
             }
 
+            val todoMatch = todoItem.matchEntire(trimmed)
+            if (todoMatch != null) {
+                val items = mutableListOf<TodoItem>()
+                while (index < lines.size) {
+                    val item = todoItem.matchEntire(lines[index].trim()) ?: break
+                    items += TodoItem(
+                        text = item.groupValues[2],
+                        checked = item.groupValues[1].equals("x", ignoreCase = true),
+                    )
+                    index++
+                }
+                blocks += MarkdownBlock.Todo(items)
+                continue
+            }
+
+            if (isTableStart(lines, index)) {
+                val header = tableCells(trimmed)
+                index += 2
+                val rows = mutableListOf<List<String>>()
+                while (index < lines.size && lines[index].trim().startsWith("|")) {
+                    rows += tableCells(lines[index])
+                    index++
+                }
+                blocks += MarkdownBlock.Table(header, rows)
+                continue
+            }
+
             if (bullet.matches(trimmed)) {
                 val items = mutableListOf<String>()
                 while (index < lines.size) {
@@ -104,8 +139,10 @@ object MarkdownParser {
                     current.startsWith("```") ||
                     heading.matches(current) ||
                     bullet.matches(current) ||
+                    todoItem.matches(current) ||
                     numbered.matches(current) ||
                     current.startsWith(">") ||
+                    isTableStart(lines, index) ||
                     divider.matches(current)
                 ) {
                     break
@@ -117,4 +154,12 @@ object MarkdownParser {
         }
         return blocks
     }
+
+    private fun tableCells(line: String): List<String> =
+        line.trim().trim('|').split('|').map { it.trim() }
+
+    private fun isTableStart(lines: List<String>, index: Int): Boolean =
+        lines[index].trim().startsWith("|") &&
+            index + 1 < lines.size &&
+            tableSeparator.matches(lines[index + 1].trim())
 }

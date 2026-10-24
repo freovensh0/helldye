@@ -50,4 +50,40 @@ class MarkdownParserTest {
             MarkdownParser.parse("line one\nline two"),
         )
     }
+
+    @Test
+    fun `todo items keep their state`() {
+        assertEquals(
+            listOf(
+                MarkdownBlock.Todo(
+                    listOf(
+                        TodoItem("one", false),
+                        TodoItem("two", true),
+                    ),
+                ),
+            ),
+            MarkdownParser.parse("- [ ] one\n- [x] two"),
+        )
+    }
+
+    @Test
+    fun `tables keep their header and rows`() {
+        assertEquals(
+            listOf(
+                MarkdownBlock.Table(
+                    header = listOf("a", "b"),
+                    rows = listOf(listOf("1", "2"), listOf("3", "4")),
+                ),
+            ),
+            MarkdownParser.parse("| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |"),
+        )
+    }
+
+    @Test
+    fun `a pipe line without a separator stays a paragraph`() {
+        assertEquals(
+            listOf(MarkdownBlock.Paragraph("| not a table")),
+            MarkdownParser.parse("| not a table"),
+        )
+    }
 }
