@@ -10,6 +10,7 @@ object SlashCommands {
         SlashCommand("/thinking", "Select thinking level"),
         SlashCommand("/new", "Start a new session"),
         SlashCommand("/abort", "Stop the active run"),
+        SlashCommand("/compact", "Compact the context"),
         SlashCommand("/help", "Show available commands"),
     )
 
