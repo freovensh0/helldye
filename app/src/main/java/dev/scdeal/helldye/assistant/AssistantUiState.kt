@@ -2,6 +2,7 @@ package dev.scdeal.helldye.assistant
 
 import dev.scdeal.helldye.gateway.GatewayCommand
 import dev.scdeal.helldye.gateway.GatewayModel
+import dev.scdeal.helldye.gateway.GatewayStats
 
 enum class ChatRole { User, Assistant, Tool }
 
@@ -42,4 +43,8 @@ data class AssistantUiState(
     val currentModel: GatewayModel? = null,
     val modelPickerOpen: Boolean = false,
     val capabilitiesLoading: Boolean = false,
+    val stats: GatewayStats? = null,
+    val thinkingLevel: String? = null,
+    val thinkingLevels: List<String> = emptyList(),
+    val thinkingPickerOpen: Boolean = false,
 )

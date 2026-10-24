@@ -68,7 +68,9 @@ import dev.scdeal.helldye.assistant.ChatMessage
 import dev.scdeal.helldye.assistant.ChatRole
 import dev.scdeal.helldye.assistant.SlashCommand
 import dev.scdeal.helldye.assistant.SlashCommands
+import dev.scdeal.helldye.assistant.UsageSummary
 import dev.scdeal.helldye.gateway.GatewayModel
+import dev.scdeal.helldye.gateway.GatewayStats
 import dev.scdeal.helldye.ui.components.SectionLabel
 import dev.scdeal.helldye.ui.components.StatusChip
 import dev.scdeal.helldye.ui.components.StatusTone
@@ -98,6 +100,9 @@ fun AssistantScreen(
     onOpenModelPicker: () -> Unit,
     onCloseModelPicker: () -> Unit,
     onSelectModel: (GatewayModel) -> Unit,
+    onOpenThinkingPicker: () -> Unit,
+    onCloseThinkingPicker: () -> Unit,
+    onSelectThinking: (String) -> Unit,
     onNewSession: () -> Unit,
     onAbort: () -> Unit,
     onExpand: (() -> Unit)?,
@@ -118,6 +123,12 @@ fun AssistantScreen(
                 onOpenModelPicker()
                 return true
             }
+            "/thinking" -> {
+                input = ""
+                attachmentMenu = false
+                onOpenThinkingPicker()
+                return true
+            }
             "/new" -> {
                 input = ""
                 attachmentMenu = false
@@ -133,7 +144,7 @@ fun AssistantScreen(
             "/help" -> {
                 input = ""
                 attachmentMenu = false
-                onNotice("Commands: /model, /new, /abort, /help")
+                onNotice("Commands: /model, /thinking, /new, /abort, /help")
                 return true
             }
         }
@@ -176,6 +187,7 @@ fun AssistantScreen(
 
     BackHandler {
         when {
+            state.thinkingPickerOpen -> onCloseThinkingPicker()
             state.modelPickerOpen -> onCloseModelPicker()
             attachmentMenu -> attachmentMenu = false
             showSlash -> input = ""
@@ -311,6 +323,10 @@ fun AssistantScreen(
                             attachmentMenu = false
                             onOpenModelPicker()
                         }
+                        AttachmentAction("THINK") {
+                            attachmentMenu = false
+                            onOpenThinkingPicker()
+                        }
                         AttachmentAction("SETTINGS", onOpenSettings)
                     }
                 }
@@ -336,6 +352,12 @@ fun AssistantScreen(
                     sendEnabled = input.isNotBlank() || state.attachments.isNotEmpty(),
                     onToggleAttachments = { attachmentMenu = !attachmentMenu },
                 )
+
+                UsageLine(
+                    model = state.currentModel?.name,
+                    thinking = state.thinkingLevel,
+                    stats = state.stats,
+                )
             }
         }
 
@@ -347,6 +369,16 @@ fun AssistantScreen(
                 error = state.error,
                 onSelect = onSelectModel,
                 onClose = onCloseModelPicker,
+            )
+        }
+
+        if (state.thinkingPickerOpen) {
+            ThinkingPicker(
+                levels = state.thinkingLevels,
+                current = state.thinkingLevel,
+                loading = state.capabilitiesLoading,
+                onSelect = onSelectThinking,
+                onClose = onCloseThinkingPicker,
             )
         }
     }
@@ -522,23 +554,39 @@ private fun AttachmentAction(label: String, onClick: () -> Unit) {
 }
 
 @Composable
+private fun UsageLine(model: String?, thinking: String?, stats: GatewayStats?) {
+    val text = UsageSummary.text(model, thinking, stats)
+    if (text.isEmpty()) return
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.5.sp),
+        color = HelldyeColors.TextMuted,
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = HelldyeDimens.Xs, start = HelldyeDimens.Xs, end = HelldyeDimens.Xs),
+    )
+}
+
+@Composable
 private fun SlashPalette(
     entries: List<SlashCommand>,
     onSelect: (SlashCommand) -> Unit,
 ) {
-    Column(
+    LazyColumn(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(max = 240.dp)
             .background(HelldyeColors.Surface, RoundedCornerShape(2.dp))
             .border(1.dp, HelldyeColors.LineSoft, RoundedCornerShape(2.dp)),
     ) {
-        entries.take(7).forEach { entry ->
+        items(entries, key = { it.command }) { entry ->
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable { onSelect(entry) }
-                    .heightIn(min = 44.dp)
+                    .heightIn(min = HelldyeDimens.TouchTarget)
                     .padding(horizontal = HelldyeDimens.Md, vertical = HelldyeDimens.Sm),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -660,6 +708,86 @@ private fun ModelPicker(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ThinkingPicker(
+    levels: List<String>,
+    current: String?,
+    loading: Boolean,
+    onSelect: (String) -> Unit,
+    onClose: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.72f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(HelldyeDimens.Lg)
+                .background(HelldyeColors.Black, RoundedCornerShape(2.dp))
+                .border(1.dp, HelldyeColors.LineStrong, RoundedCornerShape(2.dp))
+                .padding(HelldyeDimens.Md),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                SectionLabel("THINKING")
+                Spacer(Modifier.weight(1f))
+                TextButton(
+                    onClick = onClose,
+                    modifier = Modifier.heightIn(min = HelldyeDimens.TouchTarget),
+                ) {
+                    Text(
+                        text = "CLOSE",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = HelldyeColors.TextSecondary,
+                    )
+                }
+            }
+            Spacer(Modifier.height(HelldyeDimens.Sm))
+            when {
+                loading && levels.isEmpty() -> Text(
+                    text = "LOADING",
+                    style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.sp),
+                    color = HelldyeColors.TextMuted,
+                )
+                levels.isEmpty() -> Text(
+                    text = "No thinking levels for this model.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = HelldyeColors.TextMuted,
+                )
+                else -> LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
+                    items(levels, key = { it }) { level ->
+                        val active = level == current
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onSelect(level) }
+                                .heightIn(min = HelldyeDimens.TouchTarget)
+                                .padding(horizontal = HelldyeDimens.Sm),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = level.uppercase(),
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = if (active) HelldyeColors.Text else HelldyeColors.TextSecondary,
+                                modifier = Modifier.weight(1f),
+                            )
+                            if (active) {
+                                Text(
+                                    text = "ACTIVE",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = HelldyeColors.TextSecondary,
+                                )
+                            }
                         }
                     }
                 }
@@ -836,6 +964,9 @@ private fun AssistantScreenPreview() {
             onOpenModelPicker = {},
             onCloseModelPicker = {},
             onSelectModel = {},
+            onOpenThinkingPicker = {},
+            onCloseThinkingPicker = {},
+            onSelectThinking = {},
             onNewSession = {},
             onAbort = {},
             onExpand = {},

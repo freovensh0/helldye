@@ -14,8 +14,9 @@ The project is a clean build. It does not extend FRESKIEL.
 - transparent assist overlay with a blurred/dimmed background, opaque messages, and a bottom composer;
 - opaque in-app session view; the overlay expand button opens the same Pi session there;
 - photo, current-screen, and text-file attachments;
-- slash commands (`/model`, `/new`, `/abort`, `/help`) plus Pi prompt templates and skills;
-- model picker backed by Pi's available models and live session state;
+- slash commands (`/model`, `/thinking`, `/new`, `/abort`, `/help`) plus Pi prompt templates and skills;
+- model and thinking pickers backed by Pi's available models and session state;
+- Pi-style usage line under the composer: model, thinking, tokens, cost, cache hit, and context;
 - Pi gateway with one Pi-Bolt process per session, SSE replay, abort, multi-session support, and a
   read-only tool allowlist by default;
 - gateway URL/token/workspace settings in the app;

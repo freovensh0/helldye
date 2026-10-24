@@ -142,6 +142,56 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         _state.update { it.copy(modelPickerOpen = false) }
     }
 
+    fun openThinkingPicker() {
+        val config = settings.load()
+        if (config.url.isBlank()) {
+            notice("Configure the Pi gateway in Settings first.")
+            return
+        }
+        _state.update { it.copy(thinkingPickerOpen = true) }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val gateway = ensureClient(config)
+                val session = ensureSession(gateway, config)
+                startStream(gateway, session.id)
+                refreshCapabilities(gateway, session.id, announce = true)
+            } catch (error: Exception) {
+                _state.update {
+                    it.copy(
+                        thinkingPickerOpen = false,
+                        error = error.message ?: "Could not load thinking levels.",
+                    )
+                }
+            }
+        }
+    }
+
+    fun closeThinkingPicker() {
+        _state.update { it.copy(thinkingPickerOpen = false) }
+    }
+
+    fun selectThinking(level: String) {
+        val sessionId = GatewaySessionStore.sessionId ?: return
+        val gateway = client ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { gateway.setThinkingLevel(sessionId, level) }
+                .onSuccess {
+                    _state.update {
+                        it.copy(
+                            thinkingLevel = level,
+                            thinkingPickerOpen = false,
+                            error = null,
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _state.update {
+                        it.copy(error = error.message ?: "Could not set the thinking level.")
+                    }
+                }
+        }
+    }
+
     fun selectModel(model: GatewayModel) {
         val sessionId = GatewaySessionStore.sessionId ?: return
         val gateway = client ?: return
@@ -154,6 +204,17 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                             modelPickerOpen = false,
                             error = null,
                         )
+                    }
+                    runCatching { gateway.state(sessionId) }.onSuccess { sessionState ->
+                        _state.update {
+                            it.copy(
+                                currentModel = sessionState.model ?: it.currentModel,
+                                thinkingLevel = sessionState.thinkingLevel ?: it.thinkingLevel,
+                            )
+                        }
+                    }
+                    runCatching { gateway.thinkingLevels(sessionId) }.onSuccess { levels ->
+                        _state.update { it.copy(thinkingLevels = levels) }
                     }
                 }
                 .onFailure { error ->
@@ -244,12 +305,17 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             _state.update { it.copy(capabilitiesLoading = true) }
             val models = runCatching { gateway.models(sessionId) }
             val commands = runCatching { gateway.commands(sessionId) }
-            val current = runCatching { gateway.currentModel(sessionId) }
+            val sessionState = runCatching { gateway.state(sessionId) }
+            val stats = runCatching { gateway.stats(sessionId) }
+            val levels = runCatching { gateway.thinkingLevels(sessionId) }
             _state.update { state ->
                 state.copy(
                     models = models.getOrElse { state.models },
                     commands = commands.getOrElse { state.commands },
-                    currentModel = current.getOrNull() ?: state.currentModel,
+                    currentModel = sessionState.getOrNull()?.model ?: state.currentModel,
+                    thinkingLevel = sessionState.getOrNull()?.thinkingLevel ?: state.thinkingLevel,
+                    thinkingLevels = levels.getOrElse { state.thinkingLevels },
+                    stats = stats.getOrElse { state.stats },
                     capabilitiesLoading = false,
                     error = if (announce && models.isFailure) {
                         models.exceptionOrNull()?.message ?: "Could not load models."
@@ -258,6 +324,15 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     },
                 )
             }
+        }
+    }
+
+    private fun refreshStats() {
+        val gateway = client ?: return
+        val sessionId = GatewaySessionStore.sessionId ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { gateway.stats(sessionId) }
+                .onSuccess { stats -> _state.update { it.copy(stats = stats) } }
         }
     }
 
@@ -330,6 +405,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 activeAssistantId = null
                 pendingUserEchoes.clear()
                 _state.update { it.copy(streaming = false) }
+                refreshStats()
             }
             "message_start" -> {
                 val message = payload.optJSONObject("message") ?: return
