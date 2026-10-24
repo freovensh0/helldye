@@ -46,7 +46,7 @@ struct AppState {
 
 struct Session {
     id: String,
-    name: String,
+    name: RwLock<String>,
     cwd: String,
     stdin: Mutex<Option<ChildStdin>>,
     seq: AtomicU64,
@@ -101,6 +101,11 @@ struct SetModel {
     provider: String,
     #[serde(rename = "modelId")]
     model_id: String,
+}
+
+#[derive(Deserialize)]
+struct RenameSession {
+    name: String,
 }
 
 #[derive(Deserialize)]
@@ -168,7 +173,7 @@ impl Session {
     async fn info(&self) -> SessionInfo {
         SessionInfo {
             id: self.id.clone(),
-            name: self.name.clone(),
+            name: self.name.read().await.clone(),
             cwd: self.cwd.clone(),
             status: self.status.lock().await.clone(),
         }
@@ -217,6 +222,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/sessions/{id}/events", get(session_events))
         .route("/v1/sessions/{id}/prompt", post(prompt))
         .route("/v1/sessions/{id}/abort", post(abort))
+        .route("/v1/sessions/{id}/compact", post(compact))
+        .route("/v1/sessions/{id}/name", post(rename_session))
         .route("/v1/sessions/{id}/models", get(session_models))
         .route("/v1/sessions/{id}/commands", get(session_commands))
         .route("/v1/sessions/{id}/state", get(session_state))
@@ -384,6 +391,40 @@ async fn abort(
         .await
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
     Ok(Json(json!({ "accepted": true })))
+}
+
+async fn compact(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    let session = lookup(&state, &id).await?;
+    session
+        .send(json!({ "type": "compact" }))
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    Ok(Json(json!({ "accepted": true })))
+}
+
+async fn rename_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<RenameSession>,
+) -> Result<Json<SessionInfo>, (StatusCode, String)> {
+    let name = body.name.trim().to_string();
+    if name.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "name is empty".into()));
+    }
+    let session = lookup_owned(&state, &id).await?;
+    let response = session
+        .request(
+            json!({ "type": "set_session_name", "name": name }),
+            Duration::from_secs(10),
+        )
+        .await
+        .map_err(bad_gateway)?;
+    command_data(response)?;
+    *session.name.write().await = name;
+    Ok(Json(session.info().await))
 }
 
 async fn session_models(
@@ -608,7 +649,10 @@ async fn spawn_session(
     let mut child = Command::new(pi_bin)
         .arg("--mode")
         .arg("rpc")
-        .arg("--no-session")
+        .arg("--session-id")
+        .arg(&id)
+        .arg("--name")
+        .arg(&name)
         .arg("--tools")
         .arg(tools)
         .current_dir(&cwd)
@@ -624,7 +668,7 @@ async fn spawn_session(
     let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
     let session = Arc::new(Session {
         id,
-        name,
+        name: RwLock::new(name),
         cwd: cwd.to_string_lossy().into_owned(),
         stdin: Mutex::new(Some(stdin)),
         seq: AtomicU64::new(0),
