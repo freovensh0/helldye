@@ -619,7 +619,7 @@ async fn session_events(
     ensure_started(&state, &session)
         .await
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
-    let last = if query.replay {
+    let mut last = if query.replay {
         headers
             .get("last-event-id")
             .and_then(|value| value.to_str().ok())
@@ -628,6 +628,9 @@ async fn session_events(
     } else {
         session.seq.load(Ordering::SeqCst)
     };
+    if last > session.seq.load(Ordering::SeqCst) {
+        last = 0;
+    }
 
     let (tx, rx) = mpsc::channel(256);
     tokio::spawn(async move {

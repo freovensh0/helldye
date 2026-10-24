@@ -811,16 +811,15 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 }
             }
             "gateway_exit" -> {
+                activeAssistantId = null
                 pendingUserEchoes.clear()
                 _state.update {
                     it.copy(
                         streaming = false,
-                        error = "Pi process exited. Send again to start a new session.",
+                        notice = "Pi stopped. Send again to resume this session.",
+                        noticeTone = NoticeTone.Info,
                     )
                 }
-                GatewaySessionStore.reset()
-                streamJob?.cancel()
-                streamJob = null
             }
         }
     }
