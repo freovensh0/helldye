@@ -21,6 +21,20 @@ Environment equivalents: `HELLDYE_PI_BIN`, `HELLDYE_TOOLS`, `HELLDYE_TOKEN`.
 The default Pi binary is `pi-bolt` from `PATH`. The default tool allowlist is read-only. Each
 session starts with:
 
+### Termux
+
+The `gateway` workflow publishes `helldye-gateway-termux-arm64`. Download the artifact from the
+latest successful run, unpack it, then:
+
+```sh
+chmod +x helldye-gateway
+HELLDYE_TOKEN=change-me ./helldye-gateway --listen 127.0.0.1:8787 --pi "$(command -v pi-bolt)"
+```
+
+The Termux artifact is built against Android NDK API 29, so it does not need Termux's Rust package.
+If `cargo build` in Termux fails with missing `std` rlibs, use this artifact instead of rebuilding.
+
+
 ```sh
 pi-bolt --mode rpc --no-session --tools read,grep,find,ls
 ```
