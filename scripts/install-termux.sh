@@ -126,3 +126,4 @@ else
     echo "Gateway did not start. Log: $GATEWAY_DIR/gateway.log"
 fi
 echo "Manage it with: hellgate start|stop|restart|status"
+echo "If the app reports HTTP 401, copy the token with: hellgate token"

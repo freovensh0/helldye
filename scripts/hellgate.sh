@@ -20,7 +20,8 @@ Usage: hellgate <command>
   start     start the gateway in the background
   stop      stop the gateway
   restart   restart the gateway
-  status    show whether it is running
+  status    show whether it is running and accepts the token
+  token     print the bearer token
 EOF
 }
 
@@ -35,13 +36,16 @@ is_running() {
     [ -n "$p" ] && kill -0 "$p" 2>/dev/null
 }
 
-wait_health() {
-    local token="" i
-    [ -s "$TOKEN_FILE" ] && token=$(cat "$TOKEN_FILE")
+auth_ok() {
+    local token
+    token=$(cat "$TOKEN_FILE")
+    curl -fsS -H "Authorization: Bearer $token" "http://$LISTEN/v1/info" >/dev/null 2>&1
+}
+
+wait_ready() {
+    local i
     for i in $(seq 1 40); do
-        if curl -fsS -H "Authorization: Bearer $token" "http://$LISTEN/health" >/dev/null 2>&1; then
-            return 0
-        fi
+        auth_ok && return 0
         sleep 0.5
     done
     return 1
@@ -63,10 +67,10 @@ start() {
         --listen "$LISTEN" --pi "$pi" >>"$LOG_FILE" 2>&1 &
     echo $! >"$PID_FILE"
 
-    if wait_health && is_running; then
+    if wait_ready && is_running; then
         echo "hellgate running on http://$LISTEN (pid $(cat "$PID_FILE"))"
     else
-        echo "hellgate did not answer /health; last log lines:" >&2
+        echo "hellgate did not start or rejected the token; last log lines:" >&2
         tail -n 5 "$LOG_FILE" >&2 || true
         return 1
     fi
@@ -94,12 +98,23 @@ stop() {
 }
 
 status() {
-    if is_running; then
-        echo "hellgate running on http://$LISTEN (pid $(pid))"
-    else
+    if ! is_running; then
         echo "hellgate stopped"
         return 1
     fi
+    echo "hellgate running on http://$LISTEN (pid $(pid))"
+    if auth_ok; then
+        echo "token: ok"
+    else
+        echo "token: rejected; another gateway may hold the port, or the token changed"
+        return 1
+    fi
+}
+
+show_token() {
+    [ -s "$TOKEN_FILE" ] || die "missing $TOKEN_FILE; run the HELLDYE installer"
+    cat "$TOKEN_FILE"
+    echo
 }
 
 case "${1:-}" in
@@ -110,6 +125,7 @@ restart)
     start
     ;;
 status) status ;;
+token) show_token ;;
 help | -h | --help) usage ;;
 *)
     usage
