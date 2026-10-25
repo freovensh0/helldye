@@ -3,7 +3,6 @@ package dev.scdeal.helldye.assistant
 import android.app.KeyguardManager
 import android.content.Intent
 import android.os.Bundle
-import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
@@ -59,7 +58,8 @@ abstract class AssistantHostActivity : ComponentActivity() {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
         }
-        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        // The operator asked for assist screenshots to work; FLAG_SECURE is intentionally absent.
+        // Recents is still excluded, and the screenshot stays memory-only.
         unlocked = keyguard?.isKeyguardLocked != true
 
         setContent {

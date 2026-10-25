@@ -66,6 +66,9 @@ not evidence that the project builds. A change is verified only by a green run o
   `AccessibilityService` or `MediaProjection`.
 - The screenshot is ephemeral: staged in memory, sent only when the user submits, only to the selected
   gateway, never logged, and never written to preferences, files, or disk.
+- Assistant activities are excluded from recents. They do not set `FLAG_SECURE` (operator decision,
+  2026-10-25) so assist screenshots can be captured; accept that assistant windows are visible to
+  screen capture and recording.
 - A screen query is ephemeral: use an in-memory Pi session (`--no-session`) with the read-only tool
   profile, and do not add the answer to a persistent transcript. Attaching a capture to a persistent
   session needs an explicit retention decision first.
