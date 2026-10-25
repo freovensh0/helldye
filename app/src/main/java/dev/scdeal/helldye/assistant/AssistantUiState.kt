@@ -71,6 +71,8 @@ data class AssistantUiState(
     val editorPrefill: String? = null,
     val queued: Int = 0,
     val compacting: Boolean = false,
+    val hasOlder: Boolean = false,
+    val loadingOlder: Boolean = false,
     val sessions: List<GatewaySession> = emptyList(),
     val sessionsOpen: Boolean = false,
     val sessionsLoading: Boolean = false,
