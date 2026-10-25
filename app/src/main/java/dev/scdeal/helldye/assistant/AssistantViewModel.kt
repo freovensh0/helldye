@@ -717,6 +717,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             streamJob = null
             client = null
             activeAssistantId = null
+            activeCwd = null
             toolMessages.clear()
             pendingUserEchoes.clear()
             capabilitiesSessionId = null
