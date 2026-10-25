@@ -54,6 +54,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     private var activeAssistantId: String? = null
     private val toolMessages = mutableMapOf<String, String>()
     private val pendingUserEchoes = ConcurrentLinkedQueue<String>()
+    private var olderCursor: Int? = null
     private val handledExtensionIds = ConcurrentHashMap.newKeySet<String>()
     private var dialogTimeoutJob: Job? = null
 
@@ -283,6 +284,33 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     runCatching { client?.deleteSession(id) }
                     if (screenSessionId == id) screenSessionId = null
                 }
+            }
+        }
+    }
+
+    /** Prepend the previous transcript page; pages are index slices, so nothing overlaps. */
+    fun loadOlder() {
+        val before = olderCursor ?: return
+        if (!_state.value.hasOlder || _state.value.loadingOlder) return
+        val gateway = client ?: return
+        val sessionId = GatewaySessionStore.sessionId ?: return
+        _state.update { it.copy(loadingOlder = true) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val page = runCatching { gateway.messages(sessionId, limit = 500, before = before) }
+                .getOrNull()
+            if (page == null || GatewaySessionStore.sessionId != sessionId) {
+                _state.update { it.copy(loadingOlder = false) }
+                return@launch
+            }
+            val older = SessionTranscript.restore(page.messages)
+            older.toolMessageIds.forEach { (callId, id) -> toolMessages.putIfAbsent(callId, id) }
+            olderCursor = (before - page.messages.length()).coerceAtLeast(0)
+            _state.update {
+                it.copy(
+                    messages = older.messages + it.messages,
+                    hasOlder = page.hasMore,
+                    loadingOlder = false,
+                )
             }
         }
     }
@@ -593,6 +621,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         GatewaySessionStore.sessionId = sessionId
         GatewaySessionStore.lastEventId = null
         GatewaySessionStore.fingerprint = config.fingerprint
+        olderCursor = null
         activeAssistantId = null
         toolMessages.clear()
         pendingUserEchoes.clear()
@@ -884,6 +913,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 restoreMessages(transcript.messages)
                 GatewaySessionStore.lastEventId = transcript.eventId
                 GatewaySessionStore.epoch = transcript.epoch ?: GatewaySessionStore.epoch
+                olderCursor = (transcript.total - transcript.messages.length()).coerceAtLeast(0)
+                _state.update { it.copy(hasOlder = transcript.hasMore) }
             }
             if (snapshot?.started == true) {
                 startStream(gateway, sessionId, skipReplay = !restored || transcript.eventId == null)

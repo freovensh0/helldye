@@ -145,6 +145,7 @@ fun AssistantScreen(
     onSwitchSession: (String) -> Unit,
     onDeleteSession: (String) -> Unit,
     onRenameSession: (String, String) -> Unit,
+    onLoadOlder: () -> Unit,
     onExpand: (() -> Unit)?,
     onClose: () -> Unit,
 ) {
@@ -366,6 +367,22 @@ fun AssistantScreen(
                         ),
                         verticalArrangement = Arrangement.spacedBy(HelldyeDimens.Lg),
                     ) {
+                        if (state.hasOlder) {
+                            item(key = "older") {
+                                TextButton(
+                                    onClick = onLoadOlder,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(min = HelldyeDimens.TouchTarget),
+                                ) {
+                                    Text(
+                                        text = if (state.loadingOlder) "LOADING…" else "LOAD OLDER",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = HelldyeColors.TextSecondary,
+                                    )
+                                }
+                            }
+                        }
                         if (state.messages.isEmpty() && state.screenMessages.isEmpty()) {
                             item(key = "empty") {
                                 EmptyState(
@@ -2263,6 +2280,7 @@ private fun AssistantScreenPreview() {
             onSwitchSession = {},
             onDeleteSession = {},
             onRenameSession = { _, _ -> },
+            onLoadOlder = {},
             onExpand = {},
             onClose = {},
         )
