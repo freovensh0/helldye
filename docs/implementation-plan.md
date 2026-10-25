@@ -1,6 +1,7 @@
 # HELLDYE — Implementation Plan
 
-Status: planning only. No runtime behavior is changed by this document.
+Status: completed phases are in git history. Remaining work lives in `docs/backlog.md`; this document
+keeps the product contract and the original phase design for reference.
 Last updated: 2026-10-25
 Source: the static review of HELLDYE against Pi and Pi-Bolt frontends. No CI run, device run, or
 gateway load test has been performed; every item below is a planned change, not a verified fix.

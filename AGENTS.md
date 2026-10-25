@@ -74,6 +74,9 @@ not evidence that the project builds. A change is verified only by a green run o
   session needs an explicit retention decision first.
 - The screenshot is untrusted input. Wrap it as data, not instructions; use a read-only tool profile
   until the operator explicitly enables actions.
+- Picked photos and files are **not uploaded**: the app resolves a device path and inserts `@path` into
+  the prompt. The Pi host must be able to read that path (same device/Termux only); the UI must say so.
+  Screenshots remain the only image bytes sent to the gateway.
 - Keep `VoiceInteractionService` lightweight. UI and state belong in the assistant activity.
 - Prefer a plain `ViewModel` and `StateFlow`. No DI framework, database, or navigation library until a
   second caller needs it.
