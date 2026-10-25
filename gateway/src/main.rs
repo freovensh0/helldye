@@ -41,6 +41,11 @@ const MAX_IMAGE_EDGE: u32 = 1_568;
 const MAX_IMAGE_BYTES: usize = 1_500_000;
 const MAX_TOTAL_IMAGE_BYTES: usize = 6_000_000;
 const STDERR_LINE_LIMIT: usize = 512;
+/// A screen query is one-shot: the record is deleted on `agent_settled`, on DELETE, or after this
+/// much time without an event. This is not the Phase 4 idle reaper; it only bounds ephemeral records.
+const EPHEMERAL_TTL_SECS: u64 = 120;
+const EPHEMERAL_WATCH_SECS: u64 = 5;
+const READ_ONLY_TOOLS: &str = "read,grep,find,ls";
 
 /// Everything Pi needs to find its binary, config, locale, and provider credentials. Nothing else
 /// from the gateway environment reaches the child.
@@ -96,10 +101,12 @@ struct Session {
     name: RwLock<String>,
     name_is_explicit: AtomicBool,
     cwd: String,
+    ephemeral: bool,
     stdin: Mutex<Option<ChildStdin>>,
     start: Mutex<()>,
     seq: AtomicU64,
     streaming: AtomicBool,
+    last_activity: AtomicU64,
     events: Mutex<VecDeque<WireEvent>>,
     tx: broadcast::Sender<WireEvent>,
     pending: Mutex<HashMap<String, oneshot::Sender<(Value, u64)>>>,
@@ -150,6 +157,10 @@ fn default_replay() -> bool {
 struct CreateSession {
     #[serde(default)]
     cwd: Option<String>,
+    /// A screen query runs in an in-memory Pi session (`--no-session`). The record is never written
+    /// to the state file or returned by the session list.
+    #[serde(default)]
+    ephemeral: bool,
 }
 
 #[derive(Deserialize)]
@@ -212,6 +223,7 @@ struct ExtensionUiResponse {
 
 impl Session {
     async fn publish(&self, kind: String, data: String) {
+        self.last_activity.store(now_epoch(), Ordering::SeqCst);
         let id = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         let event = WireEvent { id, kind, data };
         {
@@ -256,6 +268,7 @@ impl Session {
     }
 
     async fn send(&self, command: Value) -> Result<(), String> {
+        self.last_activity.store(now_epoch(), Ordering::SeqCst);
         let mut guard = self.stdin.lock().await;
         let stdin = guard
             .as_mut()
@@ -549,7 +562,7 @@ fn info_payload() -> Value {
             "images": true,
             "structuredContext": true,
             "workspaceAllowlist": true,
-            "ephemeralSessions": false,
+            "ephemeralSessions": true,
             "import": false,
             "fork": false,
             "export": false,
@@ -560,7 +573,7 @@ fn info_payload() -> Value {
 async fn list_sessions(State(state): State<AppState>) -> impl IntoResponse {
     let sessions = state.sessions.read().await;
     let mut values = Vec::with_capacity(sessions.len());
-    for session in sessions.values() {
+    for session in sessions.values().filter(|session| !session.ephemeral) {
         values.push(session.info().await);
     }
     values.sort_by(|left, right| right.created.cmp(&left.created));
@@ -576,11 +589,44 @@ async fn create_session(
 
     let id = Uuid::new_v4().to_string();
     let name = neutral_name(&id);
-    let session = new_session(id.clone(), name, cwd, now_epoch(), false);
+    let session = new_session(id.clone(), name, cwd, now_epoch(), false, body.ephemeral);
     let info = session.info().await;
-    state.sessions.write().await.insert(id, session);
-    persist_sessions(&state).await;
+    state
+        .sessions
+        .write()
+        .await
+        .insert(id, session.clone());
+    if body.ephemeral {
+        spawn_ephemeral_watchdog(state.clone(), session);
+    } else {
+        persist_sessions(&state).await;
+    }
     Ok(Json(info))
+}
+
+/// Bounds an ephemeral record whose stream disconnected before the turn settled. Activity resets the
+/// clock, so a long thinking turn is not reaped. The Phase 4 idle reaper is separate.
+fn spawn_ephemeral_watchdog(state: AppState, session: Arc<Session>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(EPHEMERAL_WATCH_SECS)).await;
+            if !state.sessions.read().await.contains_key(&session.id) {
+                return;
+            }
+            let idle = now_epoch().saturating_sub(session.last_activity.load(Ordering::SeqCst));
+            if idle >= EPHEMERAL_TTL_SECS {
+                remove_ephemeral(&state, &session.id).await;
+                return;
+            }
+        }
+    });
+}
+
+async fn remove_ephemeral(state: &AppState, id: &str) {
+    let removed = state.sessions.write().await.remove(id);
+    if let Some(session) = removed {
+        session.stdin.lock().await.take();
+    }
 }
 
 async fn get_session(
@@ -601,8 +647,11 @@ async fn delete_session(
         .await
         .remove(&id)
         .ok_or(StatusCode::NOT_FOUND)?;
+    let ephemeral = session.ephemeral;
     session.stdin.lock().await.take();
-    persist_sessions(&state).await;
+    if !ephemeral {
+        persist_sessions(&state).await;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -967,6 +1016,7 @@ fn new_session(
     cwd: PathBuf,
     created: u64,
     name_is_explicit: bool,
+    ephemeral: bool,
 ) -> Arc<Session> {
     let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
     Arc::new(Session {
@@ -974,10 +1024,12 @@ fn new_session(
         name: RwLock::new(name),
         name_is_explicit: AtomicBool::new(name_is_explicit),
         cwd: cwd.to_string_lossy().into_owned(),
+        ephemeral,
         stdin: Mutex::new(None),
         start: Mutex::new(()),
         seq: AtomicU64::new(0),
         streaming: AtomicBool::new(false),
+        last_activity: AtomicU64::new(now_epoch()),
         events: Mutex::new(VecDeque::new()),
         tx,
         pending: Mutex::new(HashMap::new()),
@@ -992,17 +1044,30 @@ async fn ensure_started(state: &AppState, session: &Arc<Session>) -> Result<(), 
         return Ok(());
     }
     let name = session.name.read().await.clone();
-    let mut child = pi_command(
-        &state.pi_bin,
-        &state.tools,
-        Path::new(&session.cwd),
-        &session.id,
-        &name,
-        env::vars_os()
-            .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?))),
-    )
-    .spawn()
-    .map_err(|error| format!("failed to start {}: {error}", state.pi_bin))?;
+    let environment = env::vars_os()
+        .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)));
+    let mut command = if session.ephemeral {
+        pi_command(
+            &state.pi_bin,
+            READ_ONLY_TOOLS,
+            Path::new(&session.cwd),
+            None,
+            None,
+            environment,
+        )
+    } else {
+        pi_command(
+            &state.pi_bin,
+            &state.tools,
+            Path::new(&session.cwd),
+            Some(&session.id),
+            Some(&name),
+            environment,
+        )
+    };
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to start {}: {error}", state.pi_bin))?;
 
     let stdin = child.stdin.take().ok_or("pi stdin is unavailable")?;
     let stdout = child.stdout.take().ok_or("pi stdout is unavailable")?;
@@ -1012,7 +1077,7 @@ async fn ensure_started(state: &AppState, session: &Arc<Session>) -> Result<(), 
     *session.stdin.lock().await = Some(stdin);
     *session.status.lock().await = "running".into();
 
-    tokio::spawn(read_stdout(session.clone(), stdout));
+    tokio::spawn(read_stdout(session.clone(), stdout, state.clone()));
     tokio::spawn(read_stderr(stderr, state.debug_stderr));
     let watcher = session.clone();
     tokio::spawn(async move {
@@ -1035,18 +1100,22 @@ fn pi_command(
     pi_bin: &str,
     tools: &str,
     cwd: &Path,
-    id: &str,
-    name: &str,
+    id: Option<&str>,
+    name: Option<&str>,
     source_environment: impl Iterator<Item = (String, String)>,
 ) -> Command {
     let mut command = Command::new(pi_bin);
+    command.arg("--mode").arg("rpc");
+    match (id, name) {
+        (Some(id), Some(name)) => {
+            command.arg("--session-id").arg(id).arg("--name").arg(name);
+        }
+        // A screen query is one-shot and must not create a Pi session file.
+        _ => {
+            command.arg("--no-session");
+        }
+    }
     command
-        .arg("--mode")
-        .arg("rpc")
-        .arg("--session-id")
-        .arg(id)
-        .arg("--name")
-        .arg(name)
         .arg("--tools")
         .arg(tools)
         .current_dir(cwd)
@@ -1084,7 +1153,7 @@ async fn load_sessions(
                 if name != item.name || cwd != PathBuf::from(&item.cwd) {
                     migrated = true;
                 }
-                let session = new_session(item.id, name, cwd, item.created, item.renamed);
+                let session = new_session(item.id, name, cwd, item.created, item.renamed, false);
                 restored.insert(session.id.clone(), session);
             }
         }
@@ -1096,6 +1165,10 @@ async fn persist_sessions(state: &AppState) {
     let sessions = state.sessions.read().await;
     let mut stored = Vec::with_capacity(sessions.len());
     for session in sessions.values() {
+        // An ephemeral screen query must never leave a state-file record.
+        if session.ephemeral {
+            continue;
+        }
         stored.push(StoredSession {
             id: session.id.clone(),
             name: session.name.read().await.clone(),
@@ -1115,7 +1188,11 @@ async fn persist_sessions(state: &AppState) {
     let _ = tokio::fs::write(&state.state_file, bytes).await;
 }
 
-async fn read_stdout(session: Arc<Session>, stdout: tokio::process::ChildStdout) {
+async fn read_stdout(
+    session: Arc<Session>,
+    stdout: tokio::process::ChildStdout,
+    state: AppState,
+) {
     let mut lines = BufReader::new(stdout).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         let parsed = serde_json::from_str::<Value>(&line).ok();
@@ -1143,7 +1220,11 @@ async fn read_stdout(session: Arc<Session>, stdout: tokio::process::ChildStdout)
             "agent_settled" => session.streaming.store(false, Ordering::SeqCst),
             _ => {}
         }
-        session.publish(kind, line).await;
+        session.publish(kind.clone(), line).await;
+        if session.ephemeral && kind == "agent_settled" {
+            // The subscriber already has the settled event; the one-shot record is done.
+            remove_ephemeral(&state, &session.id).await;
+        }
     }
 }
 
@@ -1408,6 +1489,8 @@ mod tests {
         resolve_workspace, validate_images,
     };
     use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::{Json, extract::{Path as AxumPath, State}};
     use std::{fs, path::PathBuf};
     use uuid::Uuid;
 
@@ -1746,8 +1829,8 @@ mod tests {
             script.to_str().unwrap(),
             "read,grep",
             &dir,
-            "12345678-aaaa",
-            "Session 12345678",
+            Some("12345678-aaaa"),
+            Some("Session 12345678"),
             source.into_iter(),
         )
         .output()
@@ -1762,6 +1845,131 @@ mod tests {
         assert!(!environment.contains("HELLDYE_TOKEN"));
         assert!(!environment.contains("gh-secret"));
         assert!(!environment.contains("\nCI="));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ephemeral_pi_command_uses_no_session_and_read_only_tools() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("ephemeral-argv");
+        let script = dir.join("pi");
+        fs::write(&script, "#!/bin/sh\necho \"ARGS:$@\"\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let output = pi_command(
+            script.to_str().unwrap(),
+            super::READ_ONLY_TOOLS,
+            &dir,
+            None,
+            None,
+            std::iter::empty(),
+        )
+        .output()
+        .await
+        .unwrap();
+        let arguments = String::from_utf8_lossy(&output.stdout);
+
+        assert!(arguments.contains("ARGS:--mode rpc --no-session --tools read,grep,find,ls"));
+        assert!(!arguments.contains("--session-id"));
+        assert!(!arguments.contains("--name"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ephemeral_session_is_not_listed_or_persisted_and_is_deleted_after_settle() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("ephemeral-session");
+        let workspace = dir.join("ws");
+        fs::create_dir_all(&workspace).unwrap();
+        let arguments_file = dir.join("args");
+        let script = dir.join("pi");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho \"$@\" > {}\n\
+                 while IFS= read -r line; do\n\
+                   echo '{{\"type\":\"agent_start\"}}'\n\
+                   echo '{{\"type\":\"agent_settled\"}}'\n\
+                 done\n",
+                arguments_file.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let state_file = dir.join("sessions.json");
+        let state = super::AppState {
+            pi_bin: script.to_string_lossy().into_owned(),
+            tools: "read".into(),
+            token: "secret".into(),
+            workspaces: std::sync::Arc::new(vec![workspace.canonicalize().unwrap()]),
+            debug_stderr: false,
+            sessions: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            state_file: state_file.clone(),
+        };
+
+        let Json(normal) = super::create_session(
+            State(state.clone()),
+            Json(super::CreateSession {
+                cwd: None,
+                ephemeral: false,
+            }),
+        )
+        .await
+        .unwrap();
+        let Json(ephemeral) = super::create_session(
+            State(state.clone()),
+            Json(super::CreateSession {
+                cwd: None,
+                ephemeral: true,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let stored = fs::read_to_string(&state_file).unwrap();
+        assert!(stored.contains(&normal.id));
+        assert!(!stored.contains(&ephemeral.id));
+
+        let response = super::list_sessions(State(state.clone()))
+            .await
+            .into_response();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let listed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let listed = listed.as_array().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["id"], normal.id);
+
+        let _ = super::prompt(
+            State(state.clone()),
+            AxumPath(ephemeral.id.clone()),
+            Json(super::PromptBody {
+                message: "look at this".into(),
+                context: None,
+                images: Vec::new(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        for _ in 0..100 {
+            if !state.sessions.read().await.contains_key(&ephemeral.id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(!state.sessions.read().await.contains_key(&ephemeral.id));
+
+        let arguments = fs::read_to_string(&arguments_file).unwrap();
+        assert!(arguments.contains("--no-session"));
+        assert!(!arguments.contains("--session-id"));
+        let stored = fs::read_to_string(&state_file).unwrap();
+        assert!(!stored.contains(&ephemeral.id));
         let _ = fs::remove_dir_all(&dir);
     }
 }
