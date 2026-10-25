@@ -83,9 +83,11 @@ class GatewayClient(private val config: GatewayConfig) {
 
     fun info(): JSONObject = request("GET", "/info")
 
-    fun createSession(): GatewaySession {
+    fun createSession(cwd: String? = null, ephemeral: Boolean = false): GatewaySession {
         val body = JSONObject()
-        if (config.cwd.isNotBlank()) body.put("cwd", config.cwd)
+        val directory = cwd ?: config.cwd
+        if (directory.isNotBlank()) body.put("cwd", directory)
+        if (ephemeral) body.put("ephemeral", true)
         val response = request("POST", "/sessions", body)
         return GatewaySession(
             id = response.getString("id"),
@@ -304,7 +306,12 @@ class GatewayClient(private val config: GatewayConfig) {
         contextWindow = json.optInt("contextWindow"),
     )
 
-    fun events(sessionId: String, lastEventId: String?, replay: Boolean = true): Flow<GatewayEvent> = callbackFlow {
+    fun events(
+        sessionId: String,
+        lastEventId: String?,
+        replay: Boolean = true,
+        onConnected: (() -> Unit)? = null,
+    ): Flow<GatewayEvent> = callbackFlow {
         val path = "/sessions/$sessionId/events" + if (replay) "" else "?replay=false"
         val connection = openConnection(path, "GET").apply {
             readTimeout = 0
@@ -314,6 +321,11 @@ class GatewayClient(private val config: GatewayConfig) {
 
         val reader = Thread {
             try {
+                // Wait for the response headers so the caller knows the server subscribed before it
+                // sends a prompt that can settle and delete an ephemeral session.
+                val code = connection.responseCode
+                if (code !in 200..299) throw GatewayException("HTTP $code")
+                onConnected?.invoke()
                 connection.inputStream.bufferedReader(Charsets.UTF_8).use { input ->
                     readEvents(input) { event -> trySend(event) }
                 }

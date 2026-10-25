@@ -20,6 +20,13 @@ object ImageRules {
 
     fun decodedBytes(base64: String): Int = (base64.trimEnd('=').length * 3) / 4
 
+    /** The one-screenshot envelope: a JPEG that fits the long-edge and per-image byte limits. */
+    fun fitsCapture(width: Int, height: Int, bytes: Int): Boolean =
+        width > 0 && height > 0 &&
+            bytes > 0 &&
+            maxOf(width, height) <= MAX_EDGE_PX &&
+            bytes <= MAX_BYTES_PER_IMAGE
+
     fun withinBudget(existing: List<Attachment.Photo>, incoming: Attachment.Photo): Boolean {
         if (existing.size >= MAX_IMAGES) return false
         val total = existing.sumOf { decodedBytes(it.base64) } + decodedBytes(incoming.base64)

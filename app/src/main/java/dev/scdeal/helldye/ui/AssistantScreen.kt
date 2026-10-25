@@ -89,6 +89,7 @@ import dev.scdeal.helldye.assistant.ExtensionDialog
 import dev.scdeal.helldye.assistant.ExtensionWidget
 import dev.scdeal.helldye.assistant.ImageRules
 import dev.scdeal.helldye.assistant.NoticeTone
+import dev.scdeal.helldye.assistant.ScreenCaptureState
 import dev.scdeal.helldye.assistant.SlashCommand
 import dev.scdeal.helldye.assistant.SlashCommands
 import dev.scdeal.helldye.assistant.ToolInfo
@@ -116,11 +117,12 @@ import java.util.Locale
 fun AssistantScreen(
     overlay: Boolean,
     screenshot: Bitmap?,
-    assistReceived: Boolean,
+    screenState: ScreenCaptureState,
     state: AssistantUiState,
     onSubmit: (String) -> Unit,
     onAddAttachment: (Attachment) -> Unit,
     onRemoveAttachment: (Int) -> Unit,
+    onRemoveScreenshot: () -> Unit,
     onNotice: (String) -> Unit,
     onDismissNotice: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -196,7 +198,11 @@ fun AssistantScreen(
     }
 
     fun send() {
-        if (input.isBlank() && state.attachments.isEmpty()) return
+        if (input.isBlank() && state.attachments.isEmpty() &&
+            screenState != ScreenCaptureState.Ready
+        ) {
+            return
+        }
         if (runCommand(input)) return
         onSubmit(input)
         input = ""
@@ -247,21 +253,6 @@ fun AssistantScreen(
         cameraPicker.launch(uri)
     }
 
-    fun attachScreenshot() {
-        val shot = screenshot
-        if (shot == null) {
-            onNotice("No screenshot is available for this request.")
-        } else if (state.attachments.any { it is Attachment.Photo && it.name == "SCREEN" }) {
-            onNotice("The screen is already attached.")
-        } else {
-            scope.launch {
-                runCatching { readScreenshot(shot) }
-                    .onSuccess { onAddAttachment(it) }
-                    .onFailure { onNotice(it.message ?: "Could not read the screenshot.") }
-            }
-        }
-    }
-
     val speech = rememberSpeechInput(
         onResult = { input = it },
         onError = { onNotice(it) },
@@ -292,18 +283,16 @@ fun AssistantScreen(
         }
     }
 
-    val conversation = remember(state.messages) { Conversation.items(state.messages) }
-    val screenIndex = state.attachments.indexOfFirst {
-        it is Attachment.Photo && it.name == "SCREEN"
+    val conversation = remember(state.messages, state.screenMessages) {
+        Conversation.items(state.messages + state.screenMessages)
     }
-    val screenPhoto = state.attachments.getOrNull(screenIndex) as? Attachment.Photo
-    val screenStaged = screenPhoto != null
     val railState = when {
+        state.screenQuery -> "TEMP"
         state.streaming -> "THINKING"
-        screenStaged -> "TEMP"
+        screenState == ScreenCaptureState.Ready || screenState == ScreenCaptureState.Sent -> "TEMP"
         else -> "READY"
     }
-    val lastMessage = state.messages.lastOrNull()
+    val lastMessage = (state.messages + state.screenMessages).lastOrNull()
     LaunchedEffect(
         conversation.size,
         lastMessage?.text?.length,
@@ -361,12 +350,11 @@ fun AssistantScreen(
                     ),
                     verticalArrangement = Arrangement.spacedBy(HelldyeDimens.Lg),
                 ) {
-                    if (state.messages.isEmpty()) {
+                    if (state.messages.isEmpty() && state.screenMessages.isEmpty()) {
                         item(key = "empty") {
                             EmptyState(
                                 overlay = overlay,
-                                screenshotStaged = screenStaged,
-                                assistReceived = assistReceived,
+                                screenState = screenState,
                             )
                         }
                     }
@@ -380,7 +368,7 @@ fun AssistantScreen(
                             is ConversationItem.Tools -> ToolGroupBlock(item)
                         }
                     }
-                    if (state.streaming && state.messages.lastOrNull()?.role == ChatRole.User) {
+                    if (state.streaming && lastMessage?.role == ChatRole.User) {
                         item(key = "waiting") {
                             WaitingAnswer()
                         }
@@ -389,11 +377,8 @@ fun AssistantScreen(
 
                 BottomPanel(
                     state = state,
-                    overlay = overlay,
                     screenshot = screenshot,
-                    screenPhoto = screenPhoto,
-                    screenIndex = screenIndex,
-                    screenStaged = screenStaged,
+                    screenState = screenState,
                     attachmentMenu = attachmentMenu,
                     showSlash = showSlash,
                     slashEntries = slashEntries,
@@ -414,10 +399,6 @@ fun AssistantScreen(
                         attachmentMenu = false
                         takePhoto()
                     },
-                    onScreen = {
-                        attachmentMenu = false
-                        attachScreenshot()
-                    },
                     onFile = {
                         attachmentMenu = false
                         filePicker.launch("*/*")
@@ -437,6 +418,7 @@ fun AssistantScreen(
                         }
                     },
                     onRemoveAttachment = onRemoveAttachment,
+                    onRemoveScreenshot = onRemoveScreenshot,
                     onDismissNotice = onDismissNotice,
                     onOpenModelPicker = onOpenModelPicker,
                     onSlashSelect = { entry ->
@@ -644,8 +626,7 @@ private fun OverflowRow(label: String, onClick: () -> Unit) {
 @Composable
 private fun EmptyState(
     overlay: Boolean,
-    screenshotStaged: Boolean,
-    assistReceived: Boolean,
+    screenState: ScreenCaptureState,
 ) {
     Column(
         modifier = Modifier
@@ -667,8 +648,12 @@ private fun EmptyState(
         Text(
             text = when {
                 !overlay -> "Nothing leaves this phone unless you send it."
-                screenshotStaged -> "One screenshot is staged. It is sent only when you send."
-                assistReceived -> "No screenshot is staged for this request."
+                screenState == ScreenCaptureState.Ready ->
+                    "One screenshot is staged. It is sent only when you send."
+                screenState == ScreenCaptureState.Blocked ->
+                    "This screen does not allow screenshots."
+                screenState == ScreenCaptureState.Off ->
+                    "No screenshot is available for this request."
                 else -> "Screenshots stay on this phone until you send."
             },
             style = MaterialTheme.typography.bodyMedium,
@@ -925,11 +910,8 @@ private fun ToolGroupBlock(item: ConversationItem.Tools) {
 @Composable
 private fun BottomPanel(
     state: AssistantUiState,
-    overlay: Boolean,
     screenshot: Bitmap?,
-    screenPhoto: Attachment.Photo?,
-    screenIndex: Int,
-    screenStaged: Boolean,
+    screenState: ScreenCaptureState,
     attachmentMenu: Boolean,
     showSlash: Boolean,
     slashEntries: List<SlashCommand>,
@@ -941,10 +923,10 @@ private fun BottomPanel(
     onToggleAttachments: () -> Unit,
     onPhoto: () -> Unit,
     onCamera: () -> Unit,
-    onScreen: () -> Unit,
     onFile: () -> Unit,
     onPaste: () -> Unit,
     onRemoveAttachment: (Int) -> Unit,
+    onRemoveScreenshot: () -> Unit,
     onDismissNotice: () -> Unit,
     onOpenModelPicker: () -> Unit,
     onSlashSelect: (SlashCommand) -> Unit,
@@ -962,7 +944,9 @@ private fun BottomPanel(
     ).ifEmpty { "MODEL · THINKING · CONTEXT" }
     val railMessage = state.error ?: state.notice
     val railSignal = state.error != null || state.noticeTone != NoticeTone.Info
-    val otherAttachments = state.attachments.withIndex().filter { it.index != screenIndex }
+    val showStrip = screenState == ScreenCaptureState.Ready ||
+        screenState == ScreenCaptureState.Blocked ||
+        screenState == ScreenCaptureState.Off
 
     Column(
         modifier = Modifier
@@ -972,23 +956,30 @@ private fun BottomPanel(
     ) {
         ExtensionWidgets(state.extensionWidgets, above = true)
 
-        if (screenStaged && screenPhoto != null) {
+        if (showStrip) {
             ScreenshotStrip(
-                preview = screenshot,
-                detail = megabyteLabel(ImageRules.decodedBytes(screenPhoto.base64)),
-                onRemove = { onRemoveAttachment(screenIndex) },
+                preview = if (screenState == ScreenCaptureState.Ready) screenshot else null,
+                state = screenState,
+                detail = screenshot?.let {
+                    if (screenState == ScreenCaptureState.Ready) {
+                        "${it.width} × ${it.height}"
+                    } else {
+                        null
+                    }
+                },
+                onRemove = onRemoveScreenshot,
             )
             Spacer(Modifier.height(HelldyeDimens.Sm))
         }
 
-        if (otherAttachments.isNotEmpty()) {
+        if (state.attachments.isNotEmpty()) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(HelldyeDimens.Sm),
             ) {
-                otherAttachments.forEach { (index, attachment) ->
+                state.attachments.forEachIndexed { index, attachment ->
                     AttachmentChip(
                         label = attachment.label,
                         onRemove = { onRemoveAttachment(index) },
@@ -1000,10 +991,8 @@ private fun BottomPanel(
 
         if (attachmentMenu) {
             AttachmentSheet(
-                overlay = overlay,
                 onPhoto = onPhoto,
                 onCamera = onCamera,
-                onScreen = onScreen,
                 onFile = onFile,
                 onPaste = onPaste,
             )
@@ -1033,7 +1022,8 @@ private fun BottomPanel(
             onStop = onStop,
             onVoice = onVoice,
             streaming = state.streaming,
-            sendEnabled = input.isNotBlank() || state.attachments.isNotEmpty(),
+            sendEnabled = input.isNotBlank() || state.attachments.isNotEmpty() ||
+                screenState == ScreenCaptureState.Ready,
             onToggleAttachments = onToggleAttachments,
         )
 
@@ -1041,21 +1031,20 @@ private fun BottomPanel(
     }
 }
 
-private enum class ScreenshotState { Temp, Off, Blocked }
-
 @Composable
 private fun ScreenshotStrip(
     preview: Bitmap?,
+    state: ScreenCaptureState,
     detail: String?,
     onRemove: () -> Unit,
 ) {
-    val state = ScreenshotState.Temp
     val label = when (state) {
-        ScreenshotState.Temp -> "TEMP"
-        ScreenshotState.Off -> "OFF"
-        ScreenshotState.Blocked -> "BLOCKED"
+        ScreenCaptureState.Ready, ScreenCaptureState.Sent -> "TEMP"
+        ScreenCaptureState.Off -> "OFF"
+        ScreenCaptureState.Blocked -> "BLOCKED"
+        ScreenCaptureState.None -> return
     }
-    val labelColor = if (state == ScreenshotState.Blocked) {
+    val labelColor = if (state == ScreenCaptureState.Blocked) {
         HelldyeColors.Signal
     } else {
         HelldyeColors.TextMuted
@@ -1124,19 +1113,10 @@ private fun ScreenshotStrip(
     }
 }
 
-private fun megabyteLabel(bytes: Int): String =
-    if (bytes >= 1_000_000) {
-        String.format(Locale.US, "%.1f MB", bytes / 1_000_000.0)
-    } else {
-        "${(bytes + 999) / 1000} KB"
-    }
-
 @Composable
 private fun AttachmentSheet(
-    overlay: Boolean,
     onPhoto: () -> Unit,
     onCamera: () -> Unit,
-    onScreen: () -> Unit,
     onFile: () -> Unit,
     onPaste: () -> Unit,
 ) {
@@ -1149,10 +1129,6 @@ private fun AttachmentSheet(
         AttachmentSheetRow("PHOTO", onPhoto)
         Hairline(color = HelldyeColors.LineSoft)
         AttachmentSheetRow("CAMERA", onCamera)
-        if (overlay) {
-            Hairline(color = HelldyeColors.LineSoft)
-            AttachmentSheetRow("SCREEN", onScreen)
-        }
         Hairline(color = HelldyeColors.LineSoft)
         AttachmentSheetRow("FILE", onFile)
         Hairline(color = HelldyeColors.LineSoft)
@@ -2126,20 +2102,6 @@ private suspend fun readCameraPhoto(file: File): Attachment.Photo = withContext(
     readImageAttachment(name = "CAMERA", source = ImageDecoder.createSource(file))
 }
 
-private suspend fun readScreenshot(bitmap: Bitmap): Attachment.Photo = withContext(Dispatchers.IO) {
-    val size = ImageRules.scaledSize(bitmap.width, bitmap.height)
-    val scaled = if (size.first != bitmap.width || size.second != bitmap.height) {
-        Bitmap.createScaledBitmap(bitmap, size.first, size.second, true)
-    } else {
-        bitmap
-    }
-    try {
-        encodeJpeg("SCREEN", scaled)
-    } finally {
-        if (scaled !== bitmap) scaled.recycle()
-    }
-}
-
 /** Decodes with the platform decoder (which applies EXIF orientation), then re-encodes as JPEG. */
 private fun readImageAttachment(
     name: String,
@@ -2226,7 +2188,7 @@ private fun AssistantScreenPreview() {
         AssistantScreen(
             overlay = true,
             screenshot = null,
-            assistReceived = true,
+            screenState = ScreenCaptureState.None,
             state = AssistantUiState(
                 messages = listOf(
                     ChatMessage("u", ChatRole.User, "What changed in my battery settings?"),
@@ -2243,6 +2205,7 @@ private fun AssistantScreenPreview() {
             onSubmit = {},
             onAddAttachment = {},
             onRemoveAttachment = {},
+            onRemoveScreenshot = {},
             onNotice = {},
             onDismissNotice = {},
             onOpenSettings = {},

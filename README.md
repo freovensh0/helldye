@@ -41,7 +41,8 @@ run a Pi process itself.
 Screen context is screenshot-only. The app never reads screen text, traverses `AssistStructure`, runs
 OCR, or uses `AccessibilityService` or `MediaProjection`. A capture is staged in memory, sent only
 when you submit, and never written to preferences, files, or logs; removing it or closing the overlay
-drops it. Screen queries are ephemeral in the app, but Pi owns each session transcript on the host.
+drops it. Screen queries run in an ephemeral Pi session (`--no-session`) and are not added to a
+persistent transcript.
 
 Removing a session in the app is **remove from list**: it deletes the gateway record only. The Pi
 transcript stays on the host. **Purge on host** means stopping the gateway and deleting the Pi session

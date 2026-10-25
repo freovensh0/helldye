@@ -45,6 +45,9 @@ sealed interface Attachment {
 
 data class AssistantUiState(
     val messages: List<ChatMessage> = emptyList(),
+    /** Transient answer of the current screen query; cleared on close, never sent to /messages. */
+    val screenMessages: List<ChatMessage> = emptyList(),
+    val screenQuery: Boolean = false,
     val attachments: List<Attachment> = emptyList(),
     val streaming: Boolean = false,
     val notice: String? = null,

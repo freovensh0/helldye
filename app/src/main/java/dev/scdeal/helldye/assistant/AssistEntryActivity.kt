@@ -20,6 +20,10 @@ class AssistEntryActivity : ComponentActivity() {
         } else {
             MainActivity::class.java
         }
+        if (target == AssistantOverlayActivity::class.java) {
+            // This entry point has no screenshot callback; do not imply a capture exists.
+            ScreenshotStager.off()
+        }
         startActivity(Intent(this, target))
         finish()
     }
