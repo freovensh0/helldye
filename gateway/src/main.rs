@@ -1501,6 +1501,9 @@ mod tests {
     use std::{fs, path::PathBuf};
     use uuid::Uuid;
 
+    // Forks inherit an in-flight script fd; serialize fake-Pi writes with their spawns.
+    static FAKE_PI_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn temp_dir(tag: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!("helldye-{tag}-{}", Uuid::new_v4()));
         fs::create_dir_all(&path).unwrap();
@@ -1828,6 +1831,7 @@ mod tests {
     #[tokio::test]
     async fn fake_pi_receives_only_the_allowlisted_environment() {
         use std::os::unix::fs::PermissionsExt;
+        let _guard = FAKE_PI_LOCK.lock().await;
         let dir = temp_dir("fake-pi");
         let script = dir.join("pi");
         fs::write(&script, "#!/bin/sh\necho \"ARGS:$@\"\nenv\n").unwrap();
@@ -1871,6 +1875,7 @@ mod tests {
     #[tokio::test]
     async fn ephemeral_pi_command_uses_no_session_and_read_only_tools() {
         use std::os::unix::fs::PermissionsExt;
+        let _guard = FAKE_PI_LOCK.lock().await;
         let dir = temp_dir("ephemeral-argv");
         let script = dir.join("pi");
         fs::write(&script, "#!/bin/sh\necho \"ARGS:$@\"\n").unwrap();
@@ -1899,6 +1904,7 @@ mod tests {
     #[tokio::test]
     async fn ephemeral_session_is_not_listed_or_persisted_and_is_deleted_after_settle() {
         use std::os::unix::fs::PermissionsExt;
+        let _guard = FAKE_PI_LOCK.lock().await;
         let dir = temp_dir("ephemeral-session");
         let workspace = dir.join("ws");
         fs::create_dir_all(&workspace).unwrap();
