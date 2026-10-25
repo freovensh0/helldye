@@ -504,6 +504,7 @@ fun AssistantScreen(
                     onRemoveScreenshot = onRemoveScreenshot,
                     onDismissNotice = onDismissNotice,
                     onOpenModelPicker = onOpenModelPicker,
+                    onOpenDiff = onOpenDiff,
                     onSlashSelect = { entry ->
                         if (runCommand(entry.command)) {
                             keyboard?.hide()
@@ -1059,6 +1060,7 @@ private fun BottomPanel(
     onRemoveScreenshot: () -> Unit,
     onDismissNotice: () -> Unit,
     onOpenModelPicker: () -> Unit,
+    onOpenDiff: () -> Unit,
     onSlashSelect: (SlashCommand) -> Unit,
 ) {
     val statuses = buildList {
@@ -1143,6 +1145,24 @@ private fun BottomPanel(
             )
         }
 
+        if (state.changedFiles.isNotEmpty()) {
+            val additions = state.changedFiles.sumOf { it.additions }
+            val deletions = state.changedFiles.sumOf { it.deletions }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = HelldyeDimens.TouchTarget)
+                    .clickable(role = Role.Button, onClick = onOpenDiff)
+                    .padding(horizontal = HelldyeDimens.Xs),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "${state.changedFiles.size} FILES · +$additions −$deletions",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = HelldyeColors.TextMuted,
+                )
+            }
+        }
         StatusLine(text = statusText, onClick = onOpenModelPicker)
 
         Composer(

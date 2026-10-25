@@ -2,6 +2,7 @@ package dev.scdeal.helldye.assistant
 
 import dev.scdeal.helldye.gateway.GatewayCommand
 import dev.scdeal.helldye.gateway.GatewayDiff
+import dev.scdeal.helldye.gateway.GatewayDiffFile
 import dev.scdeal.helldye.gateway.GatewayModel
 import dev.scdeal.helldye.gateway.GatewayTree
 import dev.scdeal.helldye.gateway.GatewaySession
@@ -79,6 +80,8 @@ data class AssistantUiState(
     val diffLoading: Boolean = false,
     val diff: GatewayDiff? = null,
     val diffError: String? = null,
+    /** Dirty workspace files after a turn; drives the summary above the composer. */
+    val changedFiles: List<GatewayDiffFile> = emptyList(),
     val treeOpen: Boolean = false,
     val treeLoading: Boolean = false,
     val tree: GatewayTree? = null,

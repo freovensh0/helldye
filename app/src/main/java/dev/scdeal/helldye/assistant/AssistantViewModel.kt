@@ -1082,6 +1082,20 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             startStream(gateway, sessionId)
         }
         refreshCapabilities(gateway, sessionId, announce = false)
+        refreshDiffSummary()
+    }
+
+    private fun refreshDiffSummary() {
+        val gateway = client ?: return
+        val sessionId = GatewaySessionStore.sessionId ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { gateway.diff(sessionId) }
+                .onSuccess { diff ->
+                    if (GatewaySessionStore.sessionId == sessionId) {
+                        _state.update { it.copy(changedFiles = diff.files) }
+                    }
+                }
+        }
     }
 
     /** The gateway dropped events for a slow reader; replace the transcript and resume from its cursor. */
@@ -1227,6 +1241,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 settings.clearPendingSubmit()
                 _state.update { it.copy(streaming = false, stopping = false) }
                 refreshStats()
+                refreshDiffSummary()
             }
             "extension_ui_request" -> handleExtensionRequest(payload)
             "message_start" -> {
