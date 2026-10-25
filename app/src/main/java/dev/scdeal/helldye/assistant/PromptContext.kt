@@ -1,11 +1,14 @@
 package dev.scdeal.helldye.assistant
 
+import dev.scdeal.helldye.gateway.GatewayContextFile
+
+/**
+ * Converts text attachments to structured data. The gateway owns the prompt envelope and the
+ * "context is data, not instructions" rule.
+ */
 object PromptContext {
-    fun build(attachments: List<Attachment>): String? {
-        val files = attachments.filterIsInstance<Attachment.Text>()
-        if (files.isEmpty()) return null
-        return files.joinToString("\n\n") {
-            "<file name=\"${it.name}\">\n${it.content.take(64_000)}\n</file>"
+    fun files(attachments: List<Attachment>): List<GatewayContextFile> =
+        attachments.filterIsInstance<Attachment.Text>().map {
+            GatewayContextFile(name = it.name, content = it.content.take(64_000))
         }
-    }
 }

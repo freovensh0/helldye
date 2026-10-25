@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -43,16 +44,18 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import dev.scdeal.helldye.BuildConfig
 import dev.scdeal.helldye.R
 import dev.scdeal.helldye.gateway.GatewayClient
 import dev.scdeal.helldye.gateway.GatewayConfig
 import dev.scdeal.helldye.gateway.GatewaySessionStore
+import dev.scdeal.helldye.gateway.GatewayUrlPolicy
 import dev.scdeal.helldye.gateway.SettingsStore
 import dev.scdeal.helldye.ui.components.Hairline
 import dev.scdeal.helldye.ui.components.HelldyeButton
 import dev.scdeal.helldye.ui.components.HelldyeButtonStyle
 import dev.scdeal.helldye.ui.components.SectionLabel
-import dev.scdeal.helldye.ui.components.Wordmark
+import dev.scdeal.helldye.ui.components.SettingRow
 import dev.scdeal.helldye.ui.theme.HelldyeColors
 import dev.scdeal.helldye.ui.theme.HelldyeDimens
 import dev.scdeal.helldye.ui.theme.HelldyeTheme
@@ -84,14 +87,21 @@ class SettingsActivity : ComponentActivity() {
                         message = null
                     },
                     onSave = {
-                        success = store.save(config)
-                        GatewaySessionStore.reset()
-                        message = if (success) "SAVED" else "TOKEN STORAGE UNAVAILABLE"
+                        val error = GatewayUrlPolicy.validate(config.url, BuildConfig.DEBUG)
+                        if (error != null) {
+                            success = false
+                            message = error
+                        } else {
+                            success = store.save(config)
+                            GatewaySessionStore.reset()
+                            message = if (success) "SAVED" else "TOKEN STORAGE UNAVAILABLE"
+                        }
                     },
                     onTest = {
-                        if (config.url.isBlank()) {
+                        val error = GatewayUrlPolicy.validate(config.url, BuildConfig.DEBUG)
+                        if (error != null) {
                             success = false
-                            message = "GATEWAY URL IS EMPTY"
+                            message = error
                         } else {
                             scope.launch {
                                 success = true
@@ -101,7 +111,7 @@ class SettingsActivity : ComponentActivity() {
                                 }
                                 result.onSuccess {
                                     success = true
-                                    message = "CONNECTED · ${it.optString("piBin", "pi-bolt")}"
+                                    message = "CONNECTED · ${it.optString("version", "gateway")}"
                                 }.onFailure {
                                     success = false
                                     message = it.message ?: "CONNECTION FAILED"
@@ -145,16 +155,22 @@ private fun SettingsScreen(
                 modifier = Modifier.heightIn(min = HelldyeDimens.TouchTarget),
             ) {
                 Icon(
-                    painter = painterResource(R.drawable.ic_close),
-                    contentDescription = "Close settings",
+                    painter = painterResource(R.drawable.ic_back),
+                    contentDescription = "Back",
                     tint = HelldyeColors.TextSecondary,
                 )
             }
-            Wordmark()
+            Spacer(Modifier.width(HelldyeDimens.Sm))
+            Text(
+                text = "SETTINGS",
+                style = MaterialTheme.typography.labelLarge,
+                color = HelldyeColors.Text,
+            )
         }
+        Hairline(color = HelldyeColors.LineSoft)
 
         Spacer(Modifier.height(HelldyeDimens.Xl))
-        SectionLabel("PI GATEWAY")
+        SectionLabel("GATEWAY")
         Spacer(Modifier.height(HelldyeDimens.Sm))
         Text(
             text = "HELLDYE talks directly to a gateway on your Pi host. The gateway owns the Pi-Bolt process and keeps sessions alive when the phone disconnects.",
@@ -174,7 +190,7 @@ private fun SettingsScreen(
         ConfigField(
             label = "TOKEN",
             value = config.token,
-            placeholder = "optional bearer token",
+            placeholder = "required bearer token",
             keyboardType = KeyboardType.Password,
             password = true,
             onValueChange = { onConfigChange(config.copy(token = it)) },
@@ -210,6 +226,20 @@ private fun SettingsScreen(
                 color = if (success) HelldyeColors.TextSecondary else HelldyeColors.Signal,
             )
         }
+
+        Spacer(Modifier.height(HelldyeDimens.Xl))
+        Hairline(color = HelldyeColors.LineSoft)
+        Spacer(Modifier.height(HelldyeDimens.Md))
+        SectionLabel("PRIVACY")
+        SettingRow(name = "Screen context", state = "SCREENSHOT ONLY")
+        Hairline(color = HelldyeColors.LineSoft)
+        SettingRow(name = "Screenshots", state = "MEMORY ONLY")
+
+        Spacer(Modifier.height(HelldyeDimens.Xl))
+        Hairline(color = HelldyeColors.LineSoft)
+        Spacer(Modifier.height(HelldyeDimens.Md))
+        SectionLabel("ABOUT")
+        SettingRow(name = "Version", state = BuildConfig.VERSION_NAME)
 
         Spacer(Modifier.height(HelldyeDimens.Xl))
         Hairline(color = HelldyeColors.LineSoft)

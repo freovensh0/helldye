@@ -11,17 +11,40 @@ gateway never reads screen text or writes the image to disk.
 
 ```sh
 cargo build --release
-HELLDYE_TOKEN=change-me ./target/release/helldye-gateway \
+HELLDYE_TOKEN=change-me \
+HELLDYE_WORKSPACES=/home/you/projects \
+./target/release/helldye-gateway \
   --listen 127.0.0.1:8787 \
   --pi /path/to/pi-bolt \
   --tools read,grep,find,ls
 ```
 
-Environment equivalents: `HELLDYE_PI_BIN`, `HELLDYE_TOOLS`, `HELLDYE_TOKEN`.
+Environment: `HELLDYE_PI_BIN`, `HELLDYE_TOOLS`, `HELLDYE_TOKEN` or `HELLDYE_TOKEN_FILE`,
+`HELLDYE_WORKSPACES`, `HELLDYE_DEBUG`, `HELLDYE_STATE_FILE`.
+
+A bearer token is **required for every start, including loopback**. The gateway exits instead of
+serving `/v1` without one. Use `HELLDYE_TOKEN` or point `HELLDYE_TOKEN_FILE` at a file that is mode
+`0600` on Unix; any other mode is rejected. There is no `--token` flag, because a flag would expose
+the token in the process list. The token file must live outside every workspace root; startup is
+rejected if it is inside one.
+
+`HELLDYE_WORKSPACES` is a colon-separated allowlist of absolute directories and is also required.
+A session `cwd` must be an absolute path inside one of those roots; `..`, relative paths, and
+symlink escapes are rejected. When a create request omits `cwd`, the first root is used, never the
+gateway process directory.
 
 The default Pi binary is `pi-bolt` from `PATH`. The default tool allowlist is read-only
 (`read,grep,find,ls`); Pi's own default is `read,bash,edit,write`. Override it with `--tools` or
 `HELLDYE_TOOLS`, or with `hellgate tools ...` from the Termux install.
+
+### Isolation
+
+Pi is spawned with an empty environment plus an explicit allowlist: `PATH`, `HOME`, locale and
+timezone values, XDG directories, and provider/API keys. The gateway token, CI variables, and every
+other inherited value are dropped. Pi also runs as the gateway's user and `cwd` is only a starting
+directory, so the process can still read any file that user can read. **Same-user isolation is not
+a sandbox.** For strong isolation, run Pi (and the gateway) as a separate host user, container, or
+VM with only the workspace mounted.
 
 ### Termux
 
@@ -30,7 +53,9 @@ latest successful run, unpack it, then:
 
 ```sh
 chmod +x helldye-gateway
-HELLDYE_TOKEN=change-me ./helldye-gateway --listen 127.0.0.1:8787 --pi "$(command -v pi-bolt)"
+HELLDYE_TOKEN_FILE="$HOME/.config/helldye/token" \
+HELLDYE_WORKSPACES="$HOME/projects" \
+./helldye-gateway --listen 127.0.0.1:8787 --pi "$(command -v pi-bolt)"
 ```
 
 The Termux artifact is built against Android NDK API 29, so it does not need Termux's Rust package.
@@ -54,19 +79,24 @@ Bind to localhost and expose it through Tailscale Serve:
 tailscale serve --bg 8787
 ```
 
-Use the printed `https://<host>.<tailnet>.ts.net` URL as the Android gateway URL. Keep the bearer
-token enabled unless the host is already restricted to your tailnet.
+Use the printed `https://<host>.<tailnet>.ts.net` URL as the Android gateway URL. The bearer token is
+required even on loopback and over Tailscale; generate a long random value and keep it out of shell
+history and process arguments.
 
 ## Android pairing
 
 Open HELLDYE, choose **CONFIGURE** next to **Pi gateway**, and set:
 
 - **Gateway URL**: the Tailscale Serve URL or `http://127.0.0.1:8787` when using a forwarded port.
-- **Token**: the same token passed to the gateway.
-- **Workspace**: optional working directory for Pi-Bolt; defaults to the gateway process directory.
+  Release builds accept HTTPS only; a debug build may use cleartext for loopback only.
+- **Token**: the same token passed to the gateway; it is required.
+- **Workspace**: an absolute directory inside the gateway's `HELLDYE_WORKSPACES` allowlist.
+  Leaving it empty uses the first allowed root.
 
 The app creates a session on the first prompt and lists persisted sessions in the session picker. Pi
 writes each session to its own Pi session file (`--session-id`), so a stopped gateway can resume it.
+Session names are neutral (`Session 4F2A`); the gateway never derives a name from prompt text. A
+rename in the app is an explicit user action and is the only way a custom name is persisted.
 
 ## Session removal and retention
 
@@ -86,19 +116,20 @@ stays on the host.
 
 ## API
 
-All `/v1` routes require `Authorization: Bearer <token>` when a token is configured.
+All `/v1` routes require `Authorization: Bearer <token>`, including loopback. `/health` is the only
+unauthenticated route.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/health` | Unauthenticated liveness check. |
-| `GET` | `/v1/info` | Gateway and Pi binary info. |
+| `GET` | `/v1/info` | Gateway version and capability flags. No paths, env, or cwd. |
 | `GET` | `/v1/sessions` | Persisted sessions, newest first. |
-| `POST` | `/v1/sessions` | Create a session (`cwd`, `name`). |
+| `POST` | `/v1/sessions` | Create a session (`cwd` only; the name is generated). |
 | `GET` | `/v1/sessions/{id}` | Session status. |
 | `DELETE` | `/v1/sessions/{id}` | Remove the gateway record; Pi exits when stdin closes. |
 | `GET` | `/v1/sessions/{id}/events` | SSE stream; supports `Last-Event-ID` and `?replay=false`. |
 | `GET` | `/v1/sessions/{id}/messages` | Full Pi transcript plus the `eventId` it reflects. |
-| `POST` | `/v1/sessions/{id}/prompt` | Send `message`, optional `context`, optional `images`. |
+| `POST` | `/v1/sessions/{id}/prompt` | Send `message`, optional structured `context`, optional `images`. |
 | `POST` | `/v1/sessions/{id}/abort` | Abort the active turn. |
 | `GET` | `/v1/sessions/{id}/models` | Models configured in Pi. |
 | `GET` | `/v1/sessions/{id}/commands` | Prompt templates, skills, and extension commands. |
@@ -115,12 +146,19 @@ The versioned contract — request shapes, SSE events, `eventId` and epoch seman
 codes, and retention — is [`docs/gateway-contract.md`](../docs/gateway-contract.md). It describes the
 implemented gateway, including the gaps that later phases close.
 
-`context` is prepended to the prompt as-is. The Android client wraps text files in
-`<file name="...">` before sending them. Screen context is not text: it arrives only as an image in
-`images`, base64-encoded. The gateway forwards the bytes and does not inspect or transform them.
+`context` is structured data, not a pre-wrapped prompt: the app sends
+`{"files":[{"name":"notes.md","content":"..."}]}`. The gateway serializes it as JSON inside a
+clearly labeled `BEGIN CONTEXT DATA` / `END CONTEXT DATA` block, prepends a rule that the block is
+untrusted data and never instructions, and only then appends the user's message. File content is
+JSON-escaped, so `</file>`, fake system messages, and URLs cannot leave the data block. Screen
+context is never text: it arrives only as an image in `images`, base64-encoded. The gateway validates
+image MIME type, base64, dimensions, and size before forwarding the bytes.
 
 ## Limits
 
+- Images: at most 4 per prompt, JPEG or PNG, at most 1,568 px on the long edge, at most 1.5 MB each
+  and 6 MB total decoded. Larger payloads get `413`; an unsupported type or malformed image gets
+  `415`.
 - Event replay is an in-memory ring of 4,096 events per session. The session list is persisted to
   `~/.local/share/helldye/sessions.json` (`HELLDYE_STATE_FILE` overrides it), and Pi keeps each
   session's transcript in its own session file; restarting the gateway resumes it on the next request.
@@ -129,6 +167,7 @@ implemented gateway, including the gaps that later phases close.
   then opens the event stream from the returned `eventId`, so old history never depends on the
   in-memory replay ring.
 - Prompts are accepted asynchronously; streamed output and command responses arrive on SSE.
-- Pi-Bolt's stderr is logged to the gateway's stderr. The gateway does not log prompt bodies, but Pi
-  persists each prompt and image in its session transcript on the host; do not send content you do not
-  want retained there.
+- Pi's stderr is drained but not logged by default. Set `HELLDYE_DEBUG=1` to log it; lines are
+  bounded and any prompt-like, content, message, data, or image payload is dropped or redacted. The
+  gateway never logs a prompt body, an image body, or the token. Pi persists each prompt and image in
+  its session transcript on the host; do not send content you do not want retained there.

@@ -14,7 +14,7 @@ val HelldyeShapes = Shapes(
 
 object HelldyeDimens {
     val Hairline = 1.dp
-    val ScreenPadding = 20.dp
+    val ScreenPadding = 16.dp
     val Xs = 4.dp
     val Sm = 8.dp
     val Md = 12.dp

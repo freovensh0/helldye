@@ -14,6 +14,7 @@ The project is a clean build. It does not extend FRESKIEL.
   scrapes the clipboard;
 - opaque assist overlay (no blur, no dim) with opaque messages and a bottom composer;
 - opaque in-app session view; the overlay expand button opens the same Pi session there;
+- secure windows and a device-credential unlock gate before any assistant content on the lockscreen;
 - photo, camera, screenshot, clipboard, and text-file attachments;
 - slash commands (`/model`, `/thinking`, `/new`, `/abort`, `/compact`, `/help`) plus Pi prompt
   templates and skills;
@@ -60,7 +61,12 @@ The script installs the latest successful `main` builds:
 
 - gateway → `~/helldye-gateway/helldye-gateway`, restarted on `127.0.0.1:8787`;
 - APK → `/sdcard/Download/Termux/HELLDYE.apk`;
-- bearer token → `~/.config/helldye/token` (kept across updates).
+- bearer token → `~/.config/helldye/token` (kept across updates, mode `0600`);
+- workspace allowlist → `HELLDYE_WORKSPACES`, defaulting to `~/helldye-workspace`.
+
+Set `HELLDYE_WORKSPACES` to your project directories before starting the gateway; the app can only
+open a session inside that colon-separated allowlist. The token is required for every start and is
+never passed as a command-line argument.
 
 It prints the gateway URL, token, and the installed build SHA. Enter the URL and token in HELLDYE
 settings, tap the APK to install, and manage the gateway with `hellgate start`, `stop`, `restart`, or
@@ -99,17 +105,22 @@ Gateway:
 ```sh
 cd gateway
 cargo build --release
-HELLDYE_TOKEN=change-me ./target/release/helldye-gateway --listen 127.0.0.1:8787 --pi /path/to/pi-bolt
+HELLDYE_TOKEN=change-me \
+HELLDYE_WORKSPACES=/home/you/projects \
+./target/release/helldye-gateway --listen 127.0.0.1:8787 --pi /path/to/pi-bolt
 ```
 
-See `gateway/README.md` for Tailscale setup and `docs/gateway-contract.md` for the HTTP/SSE
-contract.
+A bearer token is required for every start; `HELLDYE_TOKEN_FILE` is the preferred form on a host.
+`HELLDYE_WORKSPACES` is a colon-separated allowlist and is also required. See `gateway/README.md`
+for Tailscale setup and `docs/gateway-contract.md` for the HTTP/SSE contract.
 
 ## Pairing
 
 1. Install the APK.
 2. Set HELLDYE as the default assistant.
-3. Open **Pi gateway → CONFIGURE** and enter the gateway URL and bearer token.
+3. Open **Pi gateway → CONFIGURE** and enter the gateway URL, bearer token, and a workspace inside
+   the host's `HELLDYE_WORKSPACES` allowlist. Use HTTPS; cleartext is accepted only for loopback in a
+   debug build.
 4. Trigger the assistant from the system gesture. The overlay shows `SCREEN READY` when a screenshot
    was captured.
 
