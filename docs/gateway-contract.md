@@ -39,7 +39,7 @@ never a command-line argument, and never enters the Pi child environment.
 | `GET` | `/health` | — | `200`, body `ok` |
 | `GET` | `/v1/info` | — | `200` `{version, piVersion, capabilities}` |
 | `GET` | `/v1/sessions` | — | `200`, array of `SessionInfo`, newest `created` first |
-| `POST` | `/v1/sessions` | `{cwd?}` | `200` `SessionInfo` |
+| `POST` | `/v1/sessions` | `{cwd?, ephemeral?}` | `200` `SessionInfo` |
 | `GET` | `/v1/sessions/{id}` | — | `200` `SessionInfo` |
 | `DELETE` | `/v1/sessions/{id}` | — | `204`, empty body |
 | `GET` | `/v1/sessions/{id}/events` | `?replay=true|false`, `Last-Event-ID` | `200` SSE |
@@ -81,7 +81,7 @@ never a command-line argument, and never enters the Pi child environment.
   "piVersion": null,
   "capabilities": {
     "sessions": true, "images": true, "structuredContext": true, "workspaceAllowlist": true,
-    "ephemeralSessions": false, "import": false, "fork": false, "export": false
+    "ephemeralSessions": true, "import": false, "fork": false, "export": false
   }
 }
 ```
@@ -97,6 +97,9 @@ until capability negotiation lands.
   rejected with `400`.
 - `name` is not accepted on create; use `POST /name` to rename.
 - Creating a session does not start Pi and does not run a turn.
+- `ephemeral: true` creates a one-shot screen-query session (see §6.1). It is not written to the state
+  file, is not returned by `GET /sessions`, and is spawned as `pi --mode rpc --no-session` with the
+  read-only tool profile. Omitting the field or sending `false` creates a normal persisted session.
 
 ### 2.3 Pi start behavior
 
@@ -124,6 +127,8 @@ Pi.
 - `images` carries zero to four images. Each must be JPEG or PNG, at most 1,568 px on the long edge,
   at most 1.5 MB decoded, and at most 6 MB decoded in total. The gateway validates MIME type, base64,
   magic bytes, dimensions, and size before forwarding.
+- For an ephemeral session (§6.1) the same prompt shape is used; the image and answer are not persisted
+  by the gateway and Pi runs with `--no-session`.
 - `message` may be empty only when at least one image is present; otherwise `400 message is empty`.
 - While a turn is streaming, the gateway adds `streamingBehavior: "steer"` to the Pi command.
 - The response means "accepted by the gateway for delivery to Pi", not "turn finished". Output arrives on
@@ -227,6 +232,8 @@ The app surfaces `HTTP <code>: <body>`; do not parse the body for branching.
 - `sessions.json` (`HELLDYE_STATE_FILE` or `~/.local/share/helldye/sessions.json`) stores only
   `id`, `name`, `cwd`, `created`, and whether the name is explicit. It is rewritten in full on create,
   rename, delete, and state migration; the write is not atomic.
+- An ephemeral screen-query session never enters `sessions.json` and never appears in the session
+  list. See §6.1.
 - On load, a record whose `cwd` is outside the current workspace allowlist is dropped, and a record
   without an explicit-name marker gets the neutral `Session <short id>` name.
 - The event ring is memory only and dies with the process.
@@ -238,10 +245,26 @@ The app surfaces `HTTP <code>: <body>`; do not parse the body for branching.
 
 ### 6.1 Ephemeral sessions
 
-Not implemented. Every session is started as `pi --mode rpc --session-id <id> --name <name> --tools
-<list>`, so Pi persists every prompt, including a screenshot. The gateway has no `--no-session` mode and
-no `ephemeral` field on create. Phase 3 adds an ephemeral create path for screenshot queries; until then
-a screenshot sent through this gateway lands in the selected session's transcript.
+Implemented for screen queries. `POST /v1/sessions` with `{"cwd": "...", "ephemeral": true}` creates an
+in-memory session record:
+
+- it is never written to `sessions.json` and never returned by `GET /v1/sessions`;
+- it is spawned as `pi --mode rpc --no-session --tools read,grep,find,ls` (the read-only profile is
+  fixed for this path, even when `HELLDYE_TOOLS` enables actions for normal sessions);
+- `POST /prompt` and `GET /events` work as usual, but `GET /messages` is not part of the screen-query
+  flow: Pi keeps no session file, so there is no transcript to read back;
+- the record is deleted when Pi emits `agent_settled` (the answer has been streamed), when the client
+  sends `DELETE /v1/sessions/{id}`, or after 120 seconds with no event. The last case only bounds an
+  abandoned screen query; it is not the Phase 4 idle reaper (R-07), which will govern normal sessions;
+- no prompt, image, or answer from an ephemeral session is persisted by the gateway, and the gateway
+  never writes the image to disk. The image is base64 in memory and goes to the Pi child's stdin only.
+
+A text-only prompt still uses a normal persisted session. The app creates an ephemeral session only
+when a screenshot is attached to the submit.
+
+Until this section existed, every session was started with `--session-id` and a screenshot could land
+in the Pi transcript. That is no longer true for the screen-query path. A future persistent
+screen-attachment feature needs an explicit retention decision first.
 
 ## 7. Workspace and tools
 

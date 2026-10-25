@@ -98,6 +98,11 @@ writes each session to its own Pi session file (`--session-id`), so a stopped ga
 Session names are neutral (`Session 4F2A`); the gateway never derives a name from prompt text. A
 rename in the app is an explicit user action and is the only way a custom name is persisted.
 
+A screen query creates an `ephemeral` session instead. It is spawned as
+`pi --mode rpc --no-session --tools read,grep,find,ls`, never appears in the session list or
+`sessions.json`, and is deleted on `agent_settled`, on `DELETE`, or after 120 seconds without an
+event. The image and answer are not persisted by the gateway.
+
 ## Session removal and retention
 
 Pi owns every transcript. The gateway keeps only a session record (`sessions.json`) and an in-memory
@@ -124,7 +129,7 @@ unauthenticated route.
 | `GET` | `/health` | Unauthenticated liveness check. |
 | `GET` | `/v1/info` | Gateway version and capability flags. No paths, env, or cwd. |
 | `GET` | `/v1/sessions` | Persisted sessions, newest first. |
-| `POST` | `/v1/sessions` | Create a session (`cwd` only; the name is generated). |
+| `POST` | `/v1/sessions` | Create a session (`cwd`, optional `ephemeral`; the name is generated). |
 | `GET` | `/v1/sessions/{id}` | Session status. |
 | `DELETE` | `/v1/sessions/{id}` | Remove the gateway record; Pi exits when stdin closes. |
 | `GET` | `/v1/sessions/{id}/events` | SSE stream; supports `Last-Event-ID` and `?replay=false`. |
