@@ -325,29 +325,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let home = env::var("HOME").unwrap_or_else(|_| ".".into());
             PathBuf::from(home).join(".local/share/helldye/sessions.json")
         });
-    let mut restored = HashMap::new();
-    let mut migrated = false;
-    if let Ok(bytes) = tokio::fs::read(&state_file).await {
-        if let Ok(items) = serde_json::from_slice::<Vec<StoredSession>>(&bytes) {
-            for item in items {
-                let cwd = match resolve_workspace(&workspaces, Some(&item.cwd)) {
-                    Ok(cwd) => cwd,
-                    // An old record may point outside the allowlist. Dropping it is safer than
-                    // letting a later prompt spawn Pi in that directory.
-                    Err(_) => {
-                        migrated = true;
-                        continue;
-                    }
-                };
-                let name = migrated_name(&item.id, &item.name, item.renamed);
-                if name != item.name || cwd != PathBuf::from(&item.cwd) {
-                    migrated = true;
-                }
-                let session = new_session(item.id, name, cwd, item.created, item.renamed);
-                restored.insert(session.id.clone(), session);
-            }
-        }
-    }
+    let (restored, migrated) = load_sessions(&state_file, &workspaces).await;
 
     let state = AppState {
         pi_bin,
@@ -1084,6 +1062,36 @@ fn pi_command(
     command
 }
 
+async fn load_sessions(
+    state_file: &Path,
+    workspaces: &[PathBuf],
+) -> (HashMap<String, Arc<Session>>, bool) {
+    let mut restored = HashMap::new();
+    let mut migrated = false;
+    if let Ok(bytes) = tokio::fs::read(state_file).await {
+        if let Ok(items) = serde_json::from_slice::<Vec<StoredSession>>(&bytes) {
+            for item in items {
+                let cwd = match resolve_workspace(workspaces, Some(&item.cwd)) {
+                    Ok(cwd) => cwd,
+                    // An old record may point outside the allowlist. Dropping it is safer than
+                    // letting a later prompt spawn Pi in that directory.
+                    Err(_) => {
+                        migrated = true;
+                        continue;
+                    }
+                };
+                let name = migrated_name(&item.id, &item.name, item.renamed);
+                if name != item.name || cwd != PathBuf::from(&item.cwd) {
+                    migrated = true;
+                }
+                let session = new_session(item.id, name, cwd, item.created, item.renamed);
+                restored.insert(session.id.clone(), session);
+            }
+        }
+    }
+    (restored, migrated)
+}
+
 async fn persist_sessions(state: &AppState) {
     let sessions = state.sessions.read().await;
     let mut stored = Vec::with_capacity(sessions.len());
@@ -1511,6 +1519,45 @@ mod tests {
         let stored: super::StoredSession =
             serde_json::from_str(r#"{"id":"x","name":"prompt text","cwd":"/w"}"#).unwrap();
         assert!(!stored.renamed);
+    }
+
+    #[tokio::test]
+    async fn state_file_migrates_prompt_names_and_persists_neutral() {
+        let dir = temp_dir("state-migration");
+        let workspace = dir.join("ws");
+        fs::create_dir_all(&workspace).unwrap();
+        let state_file = dir.join("sessions.json");
+        let id = "12345678-aaaa-bbbb-cccc-dddddddddddd";
+        fs::write(
+            &state_file,
+            format!(
+                r#"[{{"id":"{id}","name":"What is wrong with this layout?","cwd":"{}","created":1}}]"#,
+                workspace.display()
+            ),
+        )
+        .unwrap();
+        let roots = vec![workspace.canonicalize().unwrap()];
+        let (sessions, migrated) = super::load_sessions(&state_file, &roots).await;
+        assert!(migrated);
+        assert_eq!(sessions.len(), 1);
+        let session = sessions.values().next().unwrap();
+        assert_eq!(session.name.read().await.as_str(), "Session 12345678");
+
+        let state = super::AppState {
+            pi_bin: "pi".into(),
+            tools: "read".into(),
+            token: "secret".into(),
+            workspaces: std::sync::Arc::new(roots),
+            debug_stderr: false,
+            sessions: std::sync::Arc::new(tokio::sync::RwLock::new(sessions)),
+            state_file: state_file.clone(),
+        };
+        super::persist_sessions(&state).await;
+        let stored: Vec<super::StoredSession> =
+            serde_json::from_slice(&fs::read(&state_file).unwrap()).unwrap();
+        assert_eq!(stored[0].name, "Session 12345678");
+        assert!(!stored[0].renamed);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
