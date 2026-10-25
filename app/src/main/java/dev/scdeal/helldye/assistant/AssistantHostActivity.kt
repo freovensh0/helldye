@@ -11,7 +11,6 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import dev.scdeal.helldye.gateway.GatewaySessionStore
 import dev.scdeal.helldye.ui.AssistantScreen
 import dev.scdeal.helldye.ui.SettingsActivity
 import dev.scdeal.helldye.ui.theme.HelldyeTheme
@@ -42,7 +41,6 @@ abstract class AssistantHostActivity : ComponentActivity() {
                 val expandAction: (() -> Unit)? = if (overlay) {
                     {
                         keepDraftOnDestroy = true
-                        GatewaySessionStore.lastEventId = null
                         startActivity(
                             Intent(this@AssistantHostActivity, AssistantActivity::class.java),
                         )

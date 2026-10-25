@@ -22,8 +22,9 @@ The project is a clean build. It does not extend FRESKIEL.
   and fenced code blocks; streaming thinking blocks; collapsible tool cards with arguments,
   results, and durations;
 - stop button, queued steering messages while a turn runs, and `/compact`;
-- session picker: create, switch, rename, and delete persisted sessions; stopped sessions resume
-  from their Pi transcript after a gateway restart;
+- session picker: create, switch, rename, and delete persisted sessions; opening a session restores
+  its Pi transcript and resumes the live event stream from that point, including after a gateway or
+  Pi restart;
 - voice input through the system speech recognizer;
 - extension UI: in-app notices, status entries, widgets, editor prefill, and
   `select`/`confirm`/`input`/`editor` dialogs;
