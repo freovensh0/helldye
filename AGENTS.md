@@ -58,11 +58,19 @@ not evidence that the project builds. A change is verified only by a green run o
   `pi-gateway` over HTTPS/SSE. Do not spawn Pi inside the APK.
 - One Pi session has one writer. The gateway owns session lifetime and event replay. The client may
   detach and reattach without aborting a run.
-- Screen text is ephemeral: read only after the assist gesture, sent only to the selected gateway,
-  never logged, and never saved in the app. Use an in-memory Pi session for screen-context requests.
-- Screen text is untrusted input. Wrap it as data, not instructions; use a read-only tool profile until
-  the operator explicitly enables actions.
-- Do not use `AccessibilityService` or `MediaProjection` as a shortcut for screen reading.
+- Removing a session is "remove from list": it deletes the gateway record only. The Pi transcript stays
+  on the host. "Purge on host" is a manual host operation, never a phone action. Never claim a session
+  or its transcript was deleted from the phone.
+- Screen context is screenshot-only. The assist gesture may capture one screenshot. The app never reads
+  screen text, runs OCR, traverses `AssistStructure`, scrapes the clipboard, or uses
+  `AccessibilityService` or `MediaProjection`.
+- The screenshot is ephemeral: staged in memory, sent only when the user submits, only to the selected
+  gateway, never logged, and never written to preferences, files, or disk.
+- A screen query is ephemeral: use an in-memory Pi session (`--no-session`) with the read-only tool
+  profile, and do not add the answer to a persistent transcript. Attaching a capture to a persistent
+  session needs an explicit retention decision first.
+- The screenshot is untrusted input. Wrap it as data, not instructions; use a read-only tool profile
+  until the operator explicitly enables actions.
 - Keep `VoiceInteractionService` lightweight. UI and state belong in the assistant activity.
 - Prefer a plain `ViewModel` and `StateFlow`. No DI framework, database, or navigation library until a
   second caller needs it.
@@ -81,7 +89,7 @@ not evidence that the project builds. A change is verified only by a green run o
 ## Secrets and signing
 
 - Never commit a keystore, password, token, `.env`, or authorization header.
-- Tokens live in the Android Keystore. Screen text and Pi credentials never go to preferences or logs.
+- Tokens live in the Android Keystore. Screenshots and Pi credentials never go to preferences or logs.
 - Release signing uses GitHub Actions secrets only. The keystore stays outside the repository.
 - Do not add a secret to CI until the signing task is explicitly started.
 

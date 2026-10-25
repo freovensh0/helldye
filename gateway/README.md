@@ -4,7 +4,8 @@ Small HTTP/SSE bridge between HELLDYE and one or more `pi-bolt --mode rpc` proce
 
 The gateway owns each Pi-Bolt process and session. The phone can disconnect, switch away, or be
 killed without aborting the work; it reconnects with `Last-Event-ID` and receives the buffered
-events. Screen text is passed through to the prompt and is not written to disk.
+events. Screen context is an image: the app sends a captured screenshot with the prompt, and the
+gateway never reads screen text or writes the image to disk.
 
 ## Run
 
@@ -67,6 +68,22 @@ Open HELLDYE, choose **CONFIGURE** next to **Pi gateway**, and set:
 The app creates a session on the first prompt and lists persisted sessions in the session picker. Pi
 writes each session to its own Pi session file (`--session-id`), so a stopped gateway can resume it.
 
+## Session removal and retention
+
+Pi owns every transcript. The gateway keeps only a session record (`sessions.json`) and an in-memory
+event ring; it does not write prompts or images to its own storage.
+
+- **Remove from list** (`DELETE /v1/sessions/{id}`): removes the gateway record, persists the list, and
+  closes Pi's stdin so the process exits. This is the only removal the phone can do. It does not delete
+  the Pi transcript.
+- **Purge on host** (manual): stop the gateway and delete the Pi session file for that id from Pi's
+  session storage. There is no gateway route and no phone action for this; the app cannot reach the
+  host's Pi session files.
+
+The phone confirmation is two-step: the session row reveals `DELETE` and `KEEP`. It does not mention
+retention today; Phase 4 (R-04) renames the action to remove-from-list and states that the transcript
+stays on the host.
+
 ## API
 
 All `/v1` routes require `Authorization: Bearer <token>` when a token is configured.
@@ -75,10 +92,10 @@ All `/v1` routes require `Authorization: Bearer <token>` when a token is configu
 | --- | --- | --- |
 | `GET` | `/health` | Unauthenticated liveness check. |
 | `GET` | `/v1/info` | Gateway and Pi binary info. |
-| `GET` | `/v1/sessions` | Running sessions. |
+| `GET` | `/v1/sessions` | Persisted sessions, newest first. |
 | `POST` | `/v1/sessions` | Create a session (`cwd`, `name`). |
 | `GET` | `/v1/sessions/{id}` | Session status. |
-| `DELETE` | `/v1/sessions/{id}` | Close stdin and let Pi exit. |
+| `DELETE` | `/v1/sessions/{id}` | Remove the gateway record; Pi exits when stdin closes. |
 | `GET` | `/v1/sessions/{id}/events` | SSE stream; supports `Last-Event-ID` and `?replay=false`. |
 | `GET` | `/v1/sessions/{id}/messages` | Full Pi transcript plus the `eventId` it reflects. |
 | `POST` | `/v1/sessions/{id}/prompt` | Send `message`, optional `context`, optional `images`. |
@@ -94,8 +111,13 @@ All `/v1` routes require `Authorization: Bearer <token>` when a token is configu
 | `POST` | `/v1/sessions/{id}/compact` | Compact the session context. |
 | `POST` | `/v1/sessions/{id}/name` | Rename the session (`name`). |
 
+The versioned contract — request shapes, SSE events, `eventId` and epoch semantics, busy state, error
+codes, and retention — is [`docs/gateway-contract.md`](../docs/gateway-contract.md). It describes the
+implemented gateway, including the gaps that later phases close.
+
 `context` is prepended to the prompt as-is. The Android client wraps text files in
-`<file name="...">` before sending them; screen text is not read.
+`<file name="...">` before sending them. Screen context is not text: it arrives only as an image in
+`images`, base64-encoded. The gateway forwards the bytes and does not inspect or transform them.
 
 ## Limits
 
@@ -107,5 +129,6 @@ All `/v1` routes require `Authorization: Bearer <token>` when a token is configu
   then opens the event stream from the returned `eventId`, so old history never depends on the
   in-memory replay ring.
 - Prompts are accepted asynchronously; streamed output and command responses arrive on SSE.
-- Pi-Bolt's stderr is logged to the gateway's stderr. Do not put screen text in prompts that you do
-  not want visible in transport or Pi logs.
+- Pi-Bolt's stderr is logged to the gateway's stderr. The gateway does not log prompt bodies, but Pi
+  persists each prompt and image in its session transcript on the host; do not send content you do not
+  want retained there.

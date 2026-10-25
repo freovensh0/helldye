@@ -15,6 +15,10 @@ Scope: the assistant overlay, default-assistant onboarding, settings, and the st
 
 The mockup is an HTML/CSS visual target, not app code. It uses the exact token values in section 4.
 
+Screen context is screenshot-only (`docs/implementation-plan.md` §1.1): one staged capture, no text excerpt.
+The mockup board and PNGs still show the earlier text-context panel; they are regenerated in Phase 2 and
+are not the current spec.
+
 ---
 
 ## 1. Brief
@@ -43,7 +47,8 @@ visible on the first frame. Motion is feedback, never an entrance performance.
 - No wallpaper dynamic color. `dynamicColor` stays off.
 - No history dashboard, charts, cards grid, or decorative stats.
 - No illustration set, mascot, glassmorphism, gradients, glows, or shadows.
-- No screenshot gallery. Captured screen content is shown as metadata, not as a thumbnail.
+- No screenshot gallery. One staged capture is shown as a 40×40 preview in the composer strip; there is no
+  second copy, no history, and no browsing.
 
 ---
 
@@ -517,7 +522,8 @@ No red background. At most, a `SignalDim` fill can sit behind the outline, but t
 - 56dp, black, no elevation, no shadow.
 - Back icon 24dp on the left; title `titleMedium` at 20dp; optional mono status chip on the right.
 - Bottom 1dp `Line` only when content scrolls under it.
-- Assistant overlay: wordmark `HELLDYE` in `labelLarge`, tracking +0.12em, plus a `SCREEN ON/OFF` chip.
+- Assistant overlay: wordmark `HELLDYE` in `labelLarge`, tracking +0.12em; no screen chip (the screenshot
+  strip is the state).
 
 ### 8.7 Dialogs and sheets
 
@@ -537,7 +543,7 @@ Black fill, 1dp `LineStrong`, 2dp radius, 12dp padding, one line of `bodyMedium`
 - Indeterminate: 2dp `LinearProgressIndicator`, color `Text`, track `Line`, butt stroke cap, full width under
   the top bar.
 - No shimmer, no skeleton pulse, no centered spinner.
-- If a region is not ready, reserve its final height and show `TextMuted` text (`READING CONTEXT`), so the layout
+- If a region is not ready, reserve its final height and show `TextMuted` text (`LOADING`), so the layout
   does not jump when content arrives.
 - Determinate progress: 2dp line, white on `Line`, numeric percentage in mono.
 
@@ -561,12 +567,14 @@ Black fill, 1dp `LineStrong`, 2dp radius, 12dp padding, one line of `bodyMedium`
 
 ### 9.1 Assistant overlay (primary)
 
-Full-screen, opaque black. No translucency: the user should not see the app underneath, and screen content is
-sensitive. The overlay appears immediately; there is no entrance animation.
+Full-screen, opaque black. No translucency, no blur, no dim: the user must not see the app underneath, and
+screen content is sensitive. The overlay appears immediately; there is no entrance animation.
+
+Screen context is screenshot-only. The overlay never shows screen text, a text excerpt, or a character count.
 
 ```
 ┌──────────────────────────────────────────┐
-│ HELLDYE                    ● SCREEN ON   │ 56dp
+│ HELLDYE                         SESSION  │ 56dp
 ├──────────────────────────────────────────┤
 │                                          │
 │ LISTENING                                │ 40sp Space Grotesk
@@ -575,16 +583,13 @@ sensitive. The overlay appears immediately; there is no entrance animation.
 │ ▁▂▃▅▂▁▃▂▁  (real RMS, 48dp)              │
 │                                          │
 │ TRANSCRIPT                               │ labelMedium
-│ "What is on my screen?"                  │ 18sp
-│                                          │
-│ ┌ SCREEN CONTEXT ──────────────────────┐ │ 1dp Line
-│ │ Settings / Battery usage             │ │ 13sp
-│ │ 2 lines · 148 chars                  │ │ labelMedium muted
-│ └──────────────────────────────────────┘ │
+│ "What is wrong with this layout?"        │ 18sp
 │                                          │
 │ ANSWER                                   │ labelMedium
-│ The screen shows the battery usage...    │ 15sp/22
+│ The header is taller than the content... │ 15sp/22
 │                                          │
+├──────────────────────────────────────────┤
+│ [40×40] SCREEN   TEMP   1.2 MB      [×]  │ 56dp strip
 ├──────────────────────────────────────────┤
 │ [ MIC ]      TYPE              [ CLOSE ] │ 56dp
 └──────────────────────────────────────────┘
@@ -592,25 +597,33 @@ sensitive. The overlay appears immediately; there is no entrance animation.
 
 Specs:
 
-- Top bar: wordmark left, screen-context chip right. Chip states: `SCREEN ON` (active), `SCREEN OFF` (neutral),
-  `BLOCKED` (danger).
+- Top bar: wordmark left, session title right (ellipsized), mono state; close and one overflow at most. No
+  screen chip: the strip is the screen state.
 - Status word: `displayLarge`, one word, uppercase, `Text`. Use `LISTENING`, `THINKING`, `ANSWER`, `ERROR`.
   This is the one bold move; do not add a second oversized element.
 - Subtitle: one short sentence, `bodyMedium`, `TextSecondary`.
 - Waveform only while listening; 48dp; real amplitude.
 - Transcript: max 3 lines, `bodyLarge` 18sp, `Text`; no bubble, no card.
-- Context panel: 1dp `Line`, 0dp radius, 12dp padding. Label `SCREEN CONTEXT` in `labelMedium`; excerpt in
-  `bodyMedium` `TextSecondary`, max 2 lines; metadata `2 lines · 148 chars` in `labelMedium` `TextMuted`.
-  No screenshot thumbnail.
 - Answer: `bodyLarge`, 15/22, `Text`; scrollable if long; no per-token animation.
+- Screenshot strip: 56dp, one line, 1dp `Line` top border, 4dp inner padding. 40×40 preview with 2dp radius and
+  1dp `Line` border; label `SCREEN` in `labelMedium`; state `TEMP` in `labelMedium` `TextMuted`; size in mono
+  `labelSmall`; remove `×` with a 48dp target and the content description "Remove screenshot".
+- The preview is the one image that will be sent. It is not a gallery, not a history, and not a second copy:
+  the strip holds at most one capture. There is no text excerpt, no character count, and no OCR.
+- If capture is off: no preview; the strip reads `SCREEN   OFF` in `TextMuted`, with one banner line
+  "Screen capture is off. Enable it in settings." Action `OPEN`; the send stays text-only.
+- If the screen is secure: no preview; the strip reads `SCREEN   BLOCKED` in `Signal`, with one banner line
+  "This screen does not allow screenshots." No retry loop.
+- Remove drops the image immediately and hides the strip.
 - Bottom bar: 48dp square mic button (2dp radius, 1dp `LineStrong`, white mic icon; recording state: `Signal`
   dot + `STOP` label), `TYPE` ghost button, `CLOSE` ghost button. Keep three controls maximum.
-- If context is unavailable: a `WarningBanner` above the answer: "Screen context is off. Enable it in settings."
-  Action `OPEN`. The assistant still answers without context.
-- If the screen is blocked/secure: same banner, copy "This screen does not allow context access." No retry loop.
+- No screenshot means the assistant answers without one; never claim an image was attached.
 - If no microphone permission: `GRANT MIC` secondary button in the bottom bar; no hidden failure.
 - Back closes the assistant; state is not retained in recents. Use `FLAG_SECURE` and `excludeFromRecents` when
-  the overlay can display captured screen content.
+  the overlay can display a captured screenshot.
+
+The overlay's background stays opaque even with no screenshot staged; a dimmed background would expose the
+app underneath and is not part of this design.
 
 ### 9.2 Onboarding / default assistant
 
@@ -620,10 +633,10 @@ One scrollable screen, no carousel, no illustrations. The role and permission st
 HELLDYE
 
 Your assistant, on your terms.
-[one sentence about local processing / screen context]
+[one sentence about local processing / screenshot context]
 
 DEFAULT ASSISTANT          NOT SET        [ SET ]
-SCREEN CONTEXT             OFF            [ OPEN ]
+SCREEN CAPTURE             OFF            [ OPEN ]
 MICROPHONE                 MISSING        [ GRANT ]
 ─────────────────────────────────────────────────
 [ SET AS DEFAULT ASSISTANT ]        (primary, white)
@@ -638,8 +651,9 @@ MICROPHONE                 MISSING        [ GRANT ]
 - If the role is unavailable: replace the primary with a `WarningBanner`: "This device does not allow third-party
   assistants." Action `OPEN DEFAULT APPS`. Do not show a dead primary button.
 - If the role is held: primary becomes `OPEN ASSISTANT` and a `StatusChip` shows `DEFAULT`.
-- Screen context is system-controlled. Do not show a Switch; show status + `OPEN` and deep-link to the system
-  default-assistant screen where the toggle lives.
+- Screen capture is system-controlled. Do not show a Switch; show status + `OPEN` and deep-link to the system
+  default-assistant screen where the toggle lives. The product requests a screenshot only; it never asks for
+  screen text.
 - No permission request on first frame; request only after the user taps the row action. Show the system dialog
   and update the row immediately on return.
 
@@ -651,9 +665,9 @@ SETTINGS
 ASSISTANT
   Default assistant            NOT SET        CHANGE
   Open on assist gesture       ON
-SCREEN CONTEXT
+SCREEN CAPTURE
   Screen access                OFF            OPEN
-  Screenshot included          —              —
+  Screen text                  NEVER READ
 VOICE
   Microphone                   GRANTED
   Language                     EN
@@ -679,10 +693,10 @@ ABOUT
 |---|---|---|---|
 | Idle | Status `READY`, no waveform | "Hold the assist gesture or tap the mic." | `MIC` |
 | Listening | `LISTENING`, real waveform, red dot if recording | "Speak, or type." | `STOP` |
-| Thinking | `THINKING`, 2dp indeterminate line, layout reserved | "Reading screen context..." | `CANCEL` |
+| Thinking | `THINKING`, 2dp indeterminate line, layout reserved | "Sending the screenshot..." | `CANCEL` |
 | Answer | `ANSWER`, content, no animation | Answer text | `ASK AGAIN` |
-| No screen context | `SCREEN OFF` chip + warning banner | "Screen context is off. Enable it in settings." | `OPEN` |
-| Secure screen | `BLOCKED` chip + warning banner | "This screen does not allow context access." | `DISMISS` |
+| Capture off | `SCREEN OFF` strip state + one-line banner | "Screen capture is off. Enable it in settings." | `OPEN` |
+| Secure screen | `SCREEN BLOCKED` strip state + one-line banner | "This screen does not allow screenshots." | `DISMISS` |
 | No mic permission | Warning banner | "Microphone permission is missing." | `GRANT` |
 | No assistant role | Warning banner on onboarding | "This device does not allow third-party assistants." | `OPEN DEFAULT APPS` |
 | Empty history | `HISTORY` label, 24dp icon, one line | "No saved sessions." | none |
@@ -1019,7 +1033,7 @@ If the answer is long, put it in a `LazyColumn` with a single item or a `Column`
 - [ ] No shadows, blur, gradients, glows, or glass.
 - [ ] Loading reserves space; no shimmer; no full-screen spinner.
 - [ ] Streaming text appends without per-token animation.
-- [ ] Screen-context off, secure screen, no mic, no role, and error states are all reachable and readable.
+- [ ] Capture off, secure screen, no mic, no role, and error states are all reachable and readable.
 - [ ] Back closes the assistant; no screen content in recents (`FLAG_SECURE` when context is shown).
 - [ ] TalkBack order and content descriptions are correct.
 - [ ] 360×640, 390×844, 412×915; font scale 2.0×; no clipping.
@@ -1032,8 +1046,9 @@ If the answer is long, put it in a `LazyColumn` with a single item or a `Column`
 1. **Display face:** Space Grotesk adds sharpness; Instrument Sans 600 is the safe two-family fallback. Pick after
    a one-screen type test with Turkish copy.
 2. **Dark-only:** recommended for v1. If a light theme is requested later, design it separately; do not invert.
-3. **Screen-context preview:** the report recommends metadata only (`2 lines · 148 chars`), no screenshot thumbnail.
-   Confirm whether users need a text excerpt expanded by default.
+3. **Screenshot preview:** decided. The strip thumbnail is the preview of the one image that will be sent;
+   there is no text excerpt and no character count. Screen context is screenshot-only
+   (`docs/implementation-plan.md` §1.1).
 4. **History:** not in v1. If added, use a dense list with mono timestamps, no cards, and an explicit clear action.
 5. **Brand mark:** white `H` monogram on black with a 1dp red baseline, or the full `HELLDYE` mono wordmark.
    Avoid a dot-matrix logo, which would contradict the "no dotted font" rule.
