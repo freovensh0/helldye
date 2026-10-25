@@ -286,15 +286,8 @@ fun AssistantScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(if (overlay) Color.Transparent else HelldyeColors.Black),
+            .background(HelldyeColors.Black),
     ) {
-        if (overlay) {
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .background(HelldyeColors.Black.copy(alpha = 0.45f)),
-            )
-        }
         Column(
             modifier = Modifier
                 .fillMaxSize()

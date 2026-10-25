@@ -57,6 +57,7 @@
 
         <activity
             android:name=".assistant.AssistantActivity"
+            android:excludeFromRecents="true"
             android:exported="false"
             android:launchMode="singleTop"
             android:theme="@style/Theme.Helldye"
