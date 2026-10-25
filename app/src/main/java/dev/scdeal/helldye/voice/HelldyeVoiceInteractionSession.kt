@@ -1,5 +1,6 @@
 package dev.scdeal.helldye.voice
 
+import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -12,6 +13,10 @@ class HelldyeVoiceInteractionSession(
     context: Context,
 ) : VoiceInteractionSession(context) {
     private var launched = false
+    private val appContext = context.applicationContext
+    private val keyguard: KeyguardManager? by lazy {
+        appContext.getSystemService(KeyguardManager::class.java)
+    }
 
     override fun onPrepareShow(args: Bundle?, showFlags: Int) {
         // The assistant UI is an activity, not the session window.
@@ -30,6 +35,8 @@ class HelldyeVoiceInteractionSession(
     }
 
     override fun onHandleScreenshot(screenshot: Bitmap?) {
+        // A locked device never stages a capture; the overlay shows the unlock gate instead.
+        if (keyguard?.isKeyguardLocked == true) return
         AssistInbox.publishScreenshot(screenshot)
         if (screenshot != null) AssistInbox.markAssistReceived()
     }

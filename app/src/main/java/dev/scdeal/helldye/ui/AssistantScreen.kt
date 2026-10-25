@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.Manifest
 import android.graphics.Bitmap
+import android.graphics.ImageDecoder
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Base64
@@ -74,6 +75,7 @@ import dev.scdeal.helldye.assistant.ChatMessage
 import dev.scdeal.helldye.assistant.ChatRole
 import dev.scdeal.helldye.assistant.ExtensionDialog
 import dev.scdeal.helldye.assistant.ExtensionWidget
+import dev.scdeal.helldye.assistant.ImageRules
 import dev.scdeal.helldye.assistant.NoticeTone
 import dev.scdeal.helldye.assistant.SlashCommand
 import dev.scdeal.helldye.assistant.SlashCommands
@@ -286,15 +288,8 @@ fun AssistantScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(if (overlay) Color.Transparent else HelldyeColors.Black),
+            .background(HelldyeColors.Black),
     ) {
-        if (overlay) {
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .background(HelldyeColors.Black.copy(alpha = 0.45f)),
-            )
-        }
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -1526,53 +1521,72 @@ private fun Composer(
 }
 
 private suspend fun readPhoto(context: Context, uri: Uri): Attachment.Photo = withContext(Dispatchers.IO) {
-    val resolver = context.contentResolver
-    val mime = resolver.getType(uri) ?: "image/jpeg"
-    val bytes = resolver.openInputStream(uri)?.use { readLimited(it, 4 * 1024 * 1024) }
-        ?: error("Could not open the image.")
-    Attachment.Photo(
-        name = displayName(context, uri) ?: "photo",
-        mimeType = mime,
-        base64 = Base64.encodeToString(bytes, Base64.NO_WRAP),
+    val name = displayName(context, uri) ?: "photo"
+    readImageAttachment(
+        name = name,
+        source = ImageDecoder.createSource(context.contentResolver, uri),
     )
 }
 
 private suspend fun readCameraPhoto(file: File): Attachment.Photo = withContext(Dispatchers.IO) {
-    val bytes = file.inputStream().use { readLimited(it, 4 * 1024 * 1024) }
-    Attachment.Photo(
-        name = "CAMERA",
-        mimeType = "image/jpeg",
-        base64 = Base64.encodeToString(bytes, Base64.NO_WRAP),
-    )
+    readImageAttachment(name = "CAMERA", source = ImageDecoder.createSource(file))
 }
 
 private suspend fun readScreenshot(bitmap: Bitmap): Attachment.Photo = withContext(Dispatchers.IO) {
-    val maxDimension = 1600
-    val scale = minOf(1f, maxDimension.toFloat() / maxOf(bitmap.width, bitmap.height))
-    val scaled = if (scale < 1f) {
-        Bitmap.createScaledBitmap(
-            bitmap,
-            (bitmap.width * scale).toInt().coerceAtLeast(1),
-            (bitmap.height * scale).toInt().coerceAtLeast(1),
-            true,
-        )
+    val size = ImageRules.scaledSize(bitmap.width, bitmap.height)
+    val scaled = if (size.first != bitmap.width || size.second != bitmap.height) {
+        Bitmap.createScaledBitmap(bitmap, size.first, size.second, true)
     } else {
         bitmap
     }
+    try {
+        encodeJpeg("SCREEN", scaled)
+    } finally {
+        if (scaled !== bitmap) scaled.recycle()
+    }
+}
 
-    val output = ByteArrayOutputStream()
-    var quality = 80
-    var bytes: ByteArray
-    do {
-        output.reset()
-        scaled.compress(Bitmap.CompressFormat.JPEG, quality, output)
+/** Decodes with the platform decoder (which applies EXIF orientation), then re-encodes as JPEG. */
+private fun readImageAttachment(
+    name: String,
+    source: ImageDecoder.Source,
+): Attachment.Photo {
+    val bitmap = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+        val size = ImageRules.scaledSize(info.size.width, info.size.height)
+        decoder.setTargetSize(size.first, size.second)
+        decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE)
+    }
+    return try {
+        encodeJpeg(name, bitmap)
+    } finally {
+        bitmap.recycle()
+    }
+}
+
+private fun encodeJpeg(name: String, bitmap: Bitmap): Attachment.Photo {
+    var current = bitmap
+    var owned = false
+    var bytes = ByteArray(0)
+    var attempts = 0
+    while (true) {
+        val output = ByteArrayOutputStream()
+        current.compress(Bitmap.CompressFormat.JPEG, ImageRules.JPEG_QUALITY, output)
         bytes = output.toByteArray()
-        quality -= 15
-    } while (bytes.size > 4 * 1024 * 1024 && quality >= 35)
-
-    if (scaled !== bitmap) scaled.recycle()
-    Attachment.Photo(
-        name = "SCREEN",
+        if (bytes.size <= ImageRules.MAX_BYTES_PER_IMAGE || attempts >= 4) break
+        val next = Bitmap.createScaledBitmap(
+            current,
+            ((current.width * 3) / 4).coerceAtLeast(1),
+            ((current.height * 3) / 4).coerceAtLeast(1),
+            true,
+        )
+        if (owned) current.recycle()
+        current = next
+        owned = true
+        attempts++
+    }
+    if (owned) current.recycle()
+    return Attachment.Photo(
+        name = name,
         mimeType = "image/jpeg",
         base64 = Base64.encodeToString(bytes, Base64.NO_WRAP),
     )

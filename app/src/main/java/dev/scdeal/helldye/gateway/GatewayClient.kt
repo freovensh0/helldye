@@ -25,6 +25,12 @@ data class GatewayImage(
     val base64: String,
 )
 
+/** Structured file context. The gateway composes the data envelope; the app never pre-wraps it. */
+data class GatewayContextFile(
+    val name: String,
+    val content: String,
+)
+
 data class GatewayEvent(
     val id: String?,
     val kind: String,
@@ -77,10 +83,9 @@ class GatewayClient(private val config: GatewayConfig) {
 
     fun info(): JSONObject = request("GET", "/info")
 
-    fun createSession(name: String? = null): GatewaySession {
+    fun createSession(): GatewaySession {
         val body = JSONObject()
         if (config.cwd.isNotBlank()) body.put("cwd", config.cwd)
-        if (!name.isNullOrBlank()) body.put("name", name)
         val response = request("POST", "/sessions", body)
         return GatewaySession(
             id = response.getString("id"),
@@ -94,11 +99,27 @@ class GatewayClient(private val config: GatewayConfig) {
     fun prompt(
         sessionId: String,
         message: String,
-        context: String?,
+        contextFiles: List<GatewayContextFile>,
         images: List<GatewayImage>,
     ) {
         val body = JSONObject().put("message", message)
-        if (!context.isNullOrBlank()) body.put("context", context)
+        if (contextFiles.isNotEmpty()) {
+            body.put(
+                "context",
+                JSONObject().put(
+                    "files",
+                    JSONArray().apply {
+                        contextFiles.forEach { file ->
+                            put(
+                                JSONObject()
+                                    .put("name", file.name)
+                                    .put("content", file.content),
+                            )
+                        }
+                    },
+                ),
+            )
+        }
         if (images.isNotEmpty()) {
             body.put(
                 "images",

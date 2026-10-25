@@ -88,13 +88,13 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val gateway = ensureClient(config)
-                val session = ensureSession(gateway, config, name = display.take(40))
+                val session = ensureSession(gateway, config)
                 startStream(gateway, session.id)
                 refreshCapabilities(gateway, session.id, announce = false)
                 gateway.prompt(
                     sessionId = session.id,
                     message = prompt.ifBlank { "Use the attached context." },
-                    context = PromptContext.build(attachments),
+                    contextFiles = PromptContext.files(attachments),
                     images = attachments.filterIsInstance<Attachment.Photo>().map {
                         GatewayImage(it.mimeType, it.base64)
                     },
@@ -445,6 +445,18 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun addAttachment(attachment: Attachment) {
+        if (attachment is Attachment.Photo) {
+            val photos = _state.value.attachments.filterIsInstance<Attachment.Photo>()
+            if (!ImageRules.withinBudget(photos, attachment)) {
+                val message = if (photos.size >= ImageRules.MAX_IMAGES) {
+                    "At most ${ImageRules.MAX_IMAGES} images can be attached."
+                } else {
+                    "Images must total at most ${ImageRules.MAX_TOTAL_BYTES / 1_000_000} MB."
+                }
+                notice(message)
+                return
+            }
+        }
         _state.update { state ->
             val next = state.attachments + attachment
             AssistantDraftStore.attachments = next
@@ -542,13 +554,12 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     private fun ensureSession(
         gateway: GatewayClient,
         config: dev.scdeal.helldye.gateway.GatewayConfig,
-        name: String? = null,
     ): GatewaySession {
         val existing = GatewaySessionStore.sessionId
         if (existing != null) {
             return GatewaySession(existing, "", config.cwd, "running")
         }
-        val session = gateway.createSession(name)
+        val session = gateway.createSession()
         GatewaySessionStore.sessionId = session.id
         GatewaySessionStore.lastEventId = null
         GatewaySessionStore.fingerprint = config.fingerprint
