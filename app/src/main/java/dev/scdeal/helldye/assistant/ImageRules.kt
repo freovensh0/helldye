@@ -23,6 +23,7 @@ object ImageRules {
     /** The one-screenshot envelope: a JPEG that fits the long-edge and per-image byte limits. */
     fun fitsCapture(width: Int, height: Int, bytes: Int): Boolean =
         width > 0 && height > 0 &&
+            bytes > 0 &&
             maxOf(width, height) <= MAX_EDGE_PX &&
             bytes <= MAX_BYTES_PER_IMAGE
 

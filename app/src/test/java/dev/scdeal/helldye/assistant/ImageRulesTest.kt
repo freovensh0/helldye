@@ -42,5 +42,6 @@ class ImageRulesTest {
         assertFalse(ImageRules.fitsCapture(1_569, 1_176, 100))
         assertFalse(ImageRules.fitsCapture(800, 600, 1_500_001))
         assertFalse(ImageRules.fitsCapture(0, 600, 100))
+        assertFalse(ImageRules.fitsCapture(800, 600, 0))
     }
 }

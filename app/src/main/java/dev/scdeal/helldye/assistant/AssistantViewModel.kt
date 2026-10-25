@@ -181,6 +181,15 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             try {
                 val photo = ScreenCapture.encode(bitmap)
                     ?: throw IllegalStateException("The screenshot is too large to send.")
+                val totalBytes = ImageRules.decodedBytes(photo.base64) +
+                    ScreenQuery.photos(attachments).sumOf {
+                        ImageRules.decodedBytes(it.base64)
+                    }
+                if (totalBytes > ImageRules.MAX_TOTAL_BYTES) {
+                    throw IllegalStateException(
+                        "Images must total at most ${ImageRules.MAX_TOTAL_BYTES / 1_000_000} MB.",
+                    )
+                }
                 val gateway = ensureClient(config)
                 val session = gateway.createSession(
                     cwd = (activeCwd ?: config.cwd).takeIf { it.isNotBlank() },
