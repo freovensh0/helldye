@@ -46,6 +46,8 @@ class HelldyeVoiceInteractionSession(
             ScreenshotStager.stage(screenshot)
         }
         launchAssistant()
+        // The bitmap now lives in the stager; this session has no UI or state to keep.
+        finish()
     }
 
     private fun launchAssistant() {
