@@ -1,5 +1,6 @@
 package dev.scdeal.helldye.assistant
 
+import android.app.KeyguardManager
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -13,7 +14,8 @@ import dev.scdeal.helldye.role.AssistantRole
 class AssistEntryActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val target = if (AssistantRole.isHeld(this)) {
+        val locked = getSystemService(KeyguardManager::class.java)?.isKeyguardLocked == true
+        val target = if (locked || AssistantRole.isHeld(this)) {
             AssistantOverlayActivity::class.java
         } else {
             MainActivity::class.java
