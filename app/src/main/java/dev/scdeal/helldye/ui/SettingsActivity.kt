@@ -76,12 +76,18 @@ class SettingsActivity : ComponentActivity() {
                 var config by remember { mutableStateOf(store.load()) }
                 var message by remember { mutableStateOf<String?>(null) }
                 var success by remember { mutableStateOf(true) }
+                var readAnswers by remember { mutableStateOf(store.readAnswersEnabled()) }
                 val scope = rememberCoroutineScope()
 
                 SettingsScreen(
                     config = config,
                     message = message,
                     success = success,
+                    readAnswers = readAnswers,
+                    onToggleReadAnswers = {
+                        readAnswers = !readAnswers
+                        store.setReadAnswers(readAnswers)
+                    },
                     onConfigChange = {
                         config = it
                         message = null
@@ -131,6 +137,8 @@ private fun SettingsScreen(
     config: GatewayConfig,
     message: String?,
     success: Boolean,
+    readAnswers: Boolean,
+    onToggleReadAnswers: () -> Unit,
     onConfigChange: (GatewayConfig) -> Unit,
     onSave: () -> Unit,
     onTest: () -> Unit,
@@ -238,6 +246,24 @@ private fun SettingsScreen(
         Spacer(Modifier.height(HelldyeDimens.Xl))
         Hairline(color = HelldyeColors.LineSoft)
         Spacer(Modifier.height(HelldyeDimens.Md))
+        SectionLabel("SPEECH")
+        SettingRow(name = "Read answers", state = if (readAnswers) "ON" else "OFF")
+        Spacer(Modifier.height(HelldyeDimens.Sm))
+        Text(
+            text = "Off by default. Reads the final answer only, skips code blocks, and stops when you leave the session.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = HelldyeColors.TextSecondary,
+        )
+        Spacer(Modifier.height(HelldyeDimens.Sm))
+        HelldyeButton(
+            text = if (readAnswers) "TURN READ-ALOUD OFF" else "TURN READ-ALOUD ON",
+            onClick = onToggleReadAnswers,
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        Spacer(Modifier.height(HelldyeDimens.Xl))
+        Hairline(color = HelldyeColors.LineSoft)
+        Spacer(Modifier.height(HelldyeDimens.Md))
         SectionLabel("ABOUT")
         SettingRow(name = "Version", state = BuildConfig.VERSION_NAME)
 
@@ -309,6 +335,8 @@ private fun SettingsPreview() {
             config = GatewayConfig(url = "https://phone.tailnet.ts.net", cwd = "/home/you/code"),
             message = "CONNECTED · pi-bolt",
             success = true,
+            readAnswers = false,
+            onToggleReadAnswers = {},
             onConfigChange = {},
             onSave = {},
             onTest = {},

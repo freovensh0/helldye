@@ -1,6 +1,7 @@
 package dev.scdeal.helldye.assistant
 
 import android.app.Application
+import android.speech.tts.TextToSpeech
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.scdeal.helldye.gateway.GatewayClient
@@ -29,6 +30,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -55,6 +57,10 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     private val toolMessages = mutableMapOf<String, String>()
     private val pendingUserEchoes = ConcurrentLinkedQueue<String>()
     private var olderCursor: Int? = null
+    private var draftJob: Job? = null
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
+    private var pendingSpeech: String? = null
     private val handledExtensionIds = ConcurrentHashMap.newKeySet<String>()
     private var dialogTimeoutJob: Job? = null
 
@@ -92,6 +98,53 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    /** Read-aloud is off by default; only the final answer is spoken, never code or screen context. */
+    fun readLastAnswer() {
+        if (!settings.readAnswersEnabled()) {
+            notice("Enable \"Read answers\" in Settings first.")
+            return
+        }
+        val message = _state.value.messages.lastOrNull { it.role == ChatRole.Assistant } ?: return
+        val text = SpeechText.plain(message.text)
+        if (text.isBlank()) return
+        pendingSpeech = text
+        if (tts == null) {
+            tts = TextToSpeech(getApplication()) { status ->
+                ttsReady = status == TextToSpeech.SUCCESS
+                if (ttsReady) {
+                    tts?.language = Locale.getDefault()
+                    speakPending()
+                } else {
+                    pendingSpeech = null
+                    notice("Text-to-speech is unavailable.")
+                }
+            }
+        } else if (ttsReady) {
+            speakPending()
+        }
+    }
+
+    private fun speakPending() {
+        val text = pendingSpeech ?: return
+        pendingSpeech = null
+        tts?.speak(text.take(8_000), TextToSpeech.QUEUE_FLUSH, null, "helldye-answer")
+    }
+
+    private fun stopSpeaking() {
+        pendingSpeech = null
+        tts?.stop()
+    }
+
+    /** Debounced per-session draft persistence; the secure write never blocks typing. */
+    fun updateDraft(text: String) {
+        val sessionId = GatewaySessionStore.sessionId ?: return
+        draftJob?.cancel()
+        draftJob = viewModelScope.launch(Dispatchers.IO) {
+            delay(400)
+            settings.saveDraft(sessionId, text)
+        }
+    }
+
     fun submit(text: String) {
         val prompt = text.trim()
         val attachments = _state.value.attachments
@@ -119,6 +172,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         if (ScreenshotStager.state.value != ScreenCaptureState.None) ScreenshotStager.clear()
 
         val display = prompt.ifBlank { "Use the attached context." }
+        draftJob?.cancel()
+        GatewaySessionStore.sessionId?.let { settings.clearDraft(it) }
         settings.savePendingSubmit(display)
         val optimisticId = addUserMessage(display)
         pendingUserEchoes.add(display)
@@ -198,6 +253,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             )
         }
         AssistantDraftStore.clear()
+        draftJob?.cancel()
+        GatewaySessionStore.sessionId?.let { settings.clearDraft(it) }
         screenAssistantId = null
 
         screenJob = viewModelScope.launch(Dispatchers.IO) {
@@ -604,6 +661,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun switchSession(sessionId: String) {
+        stopSpeaking()
         if (GatewaySessionStore.sessionId == sessionId) {
             closeSessions()
             return
@@ -703,6 +761,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                         GatewaySessionStore.reset()
                         _state.value = AssistantUiState()
                     }
+                    settings.clearDraft(sessionId)
                     runCatching { gateway.sessions() }.onSuccess { sessions ->
                         _state.update { it.copy(sessions = sessions) }
                     }
@@ -784,6 +843,10 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         capabilitiesJob?.cancel()
         capabilitiesJob = null
         dialogTimeoutJob?.cancel()
+        draftJob?.cancel()
+        stopSpeaking()
+        tts?.shutdown()
+        tts = null
         // The session stays alive with the gateway; the next attach restores it from the transcript.
         super.onCleared()
     }
@@ -963,7 +1026,13 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 GatewaySessionStore.lastEventId = transcript.eventId
                 GatewaySessionStore.epoch = transcript.epoch ?: GatewaySessionStore.epoch
                 olderCursor = (transcript.total - transcript.messages.length()).coerceAtLeast(0)
-                _state.update { it.copy(hasOlder = transcript.hasMore) }
+                val draft = settings.loadDraft(sessionId)
+                _state.update {
+                    it.copy(
+                        hasOlder = transcript.hasMore,
+                        editorPrefill = draft ?: it.editorPrefill,
+                    )
+                }
             }
             if (snapshot?.started == true) {
                 startStream(gateway, sessionId, skipReplay = !restored || transcript.eventId == null)

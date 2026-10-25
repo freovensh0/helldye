@@ -123,6 +123,7 @@ fun AssistantScreen(
     screenState: ScreenCaptureState,
     state: AssistantUiState,
     onSubmit: (String) -> Unit,
+    onDraftChange: (String) -> Unit,
     onAddAttachment: (Attachment) -> Unit,
     onRemoveAttachment: (Int) -> Unit,
     onRemoveScreenshot: () -> Unit,
@@ -151,6 +152,7 @@ fun AssistantScreen(
     onImportSessions: () -> Unit,
     onOpenDiff: () -> Unit,
     onCloseDiff: () -> Unit,
+    onReadAnswer: () -> Unit,
     onExpand: (() -> Unit)?,
     onClose: () -> Unit,
 ) {
@@ -441,7 +443,10 @@ fun AssistantScreen(
                     showSlash = showSlash,
                     slashEntries = slashEntries,
                     input = input,
-                    onInputChange = { input = it },
+                    onInputChange = {
+                        input = it
+                        onDraftChange(it)
+                    },
                     onSend = ::send,
                     onStop = onAbort,
                     onVoice = ::startVoice,
@@ -495,6 +500,7 @@ fun AssistantScreen(
                 onOpenSessions = onOpenSessions,
                 onOpenSettings = onOpenSettings,
                 onOpenDiff = onOpenDiff,
+                onReadAnswer = onReadAnswer,
                 onExpand = onExpand,
                 onDismiss = { overflowOpen = false },
             )
@@ -638,6 +644,7 @@ private fun OverflowMenu(
     onOpenSessions: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenDiff: () -> Unit,
+    onReadAnswer: () -> Unit,
     onExpand: (() -> Unit)?,
     onDismiss: () -> Unit,
 ) {
@@ -668,6 +675,11 @@ private fun OverflowMenu(
             OverflowRow("DIFF") {
                 onDismiss()
                 onOpenDiff()
+            }
+            Hairline(color = HelldyeColors.LineSoft)
+            OverflowRow("READ ANSWER") {
+                onDismiss()
+                onReadAnswer()
             }
             if (onExpand != null) {
                 Hairline(color = HelldyeColors.LineSoft)
@@ -2429,6 +2441,7 @@ private fun AssistantScreenPreview() {
                 ),
             ),
             onSubmit = {},
+            onDraftChange = {},
             onAddAttachment = {},
             onRemoveAttachment = {},
             onRemoveScreenshot = {},
@@ -2457,6 +2470,7 @@ private fun AssistantScreenPreview() {
             onImportSessions = {},
             onOpenDiff = {},
             onCloseDiff = {},
+            onReadAnswer = {},
             onExpand = {},
             onClose = {},
         )

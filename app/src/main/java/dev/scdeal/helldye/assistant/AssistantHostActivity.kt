@@ -101,6 +101,7 @@ abstract class AssistantHostActivity : ComponentActivity() {
             screenState = if (overlay) screenState else ScreenCaptureState.None,
             state = state,
             onSubmit = viewModel::submit,
+            onDraftChange = viewModel::updateDraft,
             onAddAttachment = viewModel::addAttachment,
             onRemoveAttachment = viewModel::removeAttachment,
             onRemoveScreenshot = viewModel::removeScreenshot,
@@ -131,6 +132,7 @@ abstract class AssistantHostActivity : ComponentActivity() {
             onImportSessions = viewModel::importSessions,
             onOpenDiff = viewModel::openDiff,
             onCloseDiff = viewModel::closeDiff,
+            onReadAnswer = viewModel::readLastAnswer,
             onExpand = expandAction,
             onClose = { finish() },
         )
