@@ -237,6 +237,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
+                screenCollectorJob?.cancel()
                 _state.update {
                     it.copy(
                         streaming = false,
