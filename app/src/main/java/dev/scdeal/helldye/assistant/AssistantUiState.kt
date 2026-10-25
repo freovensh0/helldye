@@ -55,6 +55,8 @@ data class AssistantUiState(
     val streaming: Boolean = false,
     /** Abort accepted by the gateway, not yet settled. */
     val stopping: Boolean = false,
+    /** Device has no default network. Drafts are preserved; nothing is auto-sent. */
+    val offline: Boolean = false,
     val notice: String? = null,
     val error: String? = null,
     val sessionId: String? = null,

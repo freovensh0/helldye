@@ -315,6 +315,7 @@ fun AssistantScreen(
         Conversation.items(state.messages + state.screenMessages)
     }
     val railState = when {
+        state.offline && !state.streaming -> "OFFLINE"
         state.screenQuery -> "TEMP"
         state.stopping -> "STOPPING"
         state.streaming -> "THINKING"

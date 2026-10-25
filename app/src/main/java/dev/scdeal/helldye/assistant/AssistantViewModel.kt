@@ -1,6 +1,8 @@
 package dev.scdeal.helldye.assistant
 
 import android.app.Application
+import android.net.ConnectivityManager
+import android.net.Network
 import android.speech.tts.TextToSpeech
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -61,11 +63,23 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     private var tts: TextToSpeech? = null
     private var ttsReady = false
     private var pendingSpeech: String? = null
+    private val connectivity: ConnectivityManager? =
+        getApplication<Application>().getSystemService(ConnectivityManager::class.java)
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            _state.update { it.copy(offline = false) }
+        }
+
+        override fun onLost(network: Network) {
+            _state.update { it.copy(offline = connectivity?.activeNetwork == null) }
+        }
+    }
     private val handledExtensionIds = ConcurrentHashMap.newKeySet<String>()
     private var dialogTimeoutJob: Job? = null
 
     init {
         GatewaySessionStore.attach(settings)
+        runCatching { connectivity?.registerDefaultNetworkCallback(networkCallback) }
         viewModelScope.launch(Dispatchers.IO) {
             val pending = settings.loadPendingSubmit()
             if (pending != null) {
@@ -886,6 +900,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         stopSpeaking()
         tts?.shutdown()
         tts = null
+        runCatching { connectivity?.unregisterNetworkCallback(networkCallback) }
         // The session stays alive with the gateway; the next attach restores it from the transcript.
         super.onCleared()
     }

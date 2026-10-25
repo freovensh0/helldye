@@ -3253,6 +3253,53 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[tokio::test]
+    async fn unknown_session_is_not_found_and_spawns_nothing() {
+        let _guard = FAKE_PI_LOCK.lock().await;
+        let dir = temp_dir("unknown-session");
+        let marker = dir.join("spawned");
+        let script = dir.join("pi");
+        fs::write(&script, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+        let state = super::AppState {
+            pi_bin: script.to_string_lossy().into_owned(),
+            tools: "read".into(),
+            token: "secret".into(),
+            workspaces: std::sync::Arc::new(Vec::new()),
+            debug_stderr: false,
+            sessions: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            state_file: dir.join("sessions.json"),
+            epoch: "epoch".into(),
+            idle_secs: 0,
+            state_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        };
+        assert!(
+            super::session_state(State(state.clone()), AxumPath("missing".into()))
+                .await
+                .is_err()
+        );
+        assert!(
+            super::session_messages(
+                State(state.clone()),
+                AxumPath("missing".into()),
+                axum::extract::Query(super::PaginationQuery {
+                    limit: None,
+                    before: None,
+                }),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            super::delete_session(State(state), AxumPath("missing".into()))
+                .await
+                .is_err()
+        );
+        assert!(!marker.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn host_transcript_follows_the_active_leaf_only() {
         let bytes = concat!(
