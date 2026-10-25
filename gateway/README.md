@@ -92,10 +92,10 @@ All `/v1` routes require `Authorization: Bearer <token>` when a token is configu
 | --- | --- | --- |
 | `GET` | `/health` | Unauthenticated liveness check. |
 | `GET` | `/v1/info` | Gateway and Pi binary info. |
-| `GET` | `/v1/sessions` | Running sessions. |
+| `GET` | `/v1/sessions` | Persisted sessions, newest first. |
 | `POST` | `/v1/sessions` | Create a session (`cwd`, `name`). |
 | `GET` | `/v1/sessions/{id}` | Session status. |
-| `DELETE` | `/v1/sessions/{id}` | Close stdin and let Pi exit. |
+| `DELETE` | `/v1/sessions/{id}` | Remove the gateway record; Pi exits when stdin closes. |
 | `GET` | `/v1/sessions/{id}/events` | SSE stream; supports `Last-Event-ID` and `?replay=false`. |
 | `GET` | `/v1/sessions/{id}/messages` | Full Pi transcript plus the `eventId` it reflects. |
 | `POST` | `/v1/sessions/{id}/prompt` | Send `message`, optional `context`, optional `images`. |
@@ -110,6 +110,10 @@ All `/v1` routes require `Authorization: Bearer <token>` when a token is configu
 | `POST` | `/v1/sessions/{id}/extension_ui_response` | Answer an extension dialog (`id`, `value`/`confirmed`/`cancelled`). |
 | `POST` | `/v1/sessions/{id}/compact` | Compact the session context. |
 | `POST` | `/v1/sessions/{id}/name` | Rename the session (`name`). |
+
+The versioned contract — request shapes, SSE events, `eventId` and epoch semantics, busy state, error
+codes, and retention — is [`docs/gateway-contract.md`](../docs/gateway-contract.md). It describes the
+implemented gateway, including the gaps that later phases close.
 
 `context` is prepended to the prompt as-is. The Android client wraps text files in
 `<file name="...">` before sending them. Screen context is not text: it arrives only as an image in

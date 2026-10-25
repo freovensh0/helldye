@@ -102,7 +102,8 @@ cargo build --release
 HELLDYE_TOKEN=change-me ./target/release/helldye-gateway --listen 127.0.0.1:8787 --pi /path/to/pi-bolt
 ```
 
-See `gateway/README.md` for Tailscale setup and the HTTP/SSE contract.
+See `gateway/README.md` for Tailscale setup and `docs/gateway-contract.md` for the HTTP/SSE
+contract.
 
 ## Pairing
 
@@ -118,6 +119,7 @@ See `gateway/README.md` for Tailscale setup and the HTTP/SSE contract.
   product behavior.
 - `docs/ui-design-report.md` — visual tokens, Compose theme, screen specs.
 - `docs/mockups/ui-board.html` — approved visual board.
+- `docs/gateway-contract.md` — versioned gateway endpoints, events, errors, and retention.
 - `gateway/README.md` — Pi-Bolt gateway operation and Tailscale setup.
 - `AGENTS.md` — repository, commit, push, and build rules.
 
