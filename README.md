@@ -1,8 +1,8 @@
 # HELLDYE
 
-Android default-assistant client for Pi coding sessions. The phone shows a transparent Compose
-overlay over the current app; Pi-Bolt keeps running on its host and is reached through a small
-HTTP/SSE gateway.
+Android default-assistant client for Pi coding sessions. The phone shows an opaque Compose overlay
+over the current app; Pi-Bolt keeps running on its host and is reached through a small HTTP/SSE
+gateway.
 
 The project is a clean build. It does not extend FRESKIEL.
 
@@ -10,10 +10,11 @@ The project is a clean build. It does not extend FRESKIEL.
 
 - default-assistant role onboarding;
 - `VoiceInteractionService` and session service;
-- assist gesture captures a screenshot on request only; visible text is not read or sent automatically;
-- transparent assist overlay with a blurred/dimmed background, opaque messages, and a bottom composer;
+- assist gesture captures a screenshot on request only; the app never reads screen text, OCRs pixels, or
+  scrapes the clipboard;
+- opaque assist overlay (no blur, no dim) with opaque messages and a bottom composer;
 - opaque in-app session view; the overlay expand button opens the same Pi session there;
-- photo, camera, clipboard, current-screen, and text-file attachments;
+- photo, camera, screenshot, clipboard, and text-file attachments;
 - slash commands (`/model`, `/thinking`, `/new`, `/abort`, `/compact`, `/help`) plus Pi prompt
   templates and skills;
 - model and thinking pickers backed by Pi's available models and session state;
@@ -22,7 +23,7 @@ The project is a clean build. It does not extend FRESKIEL.
   and fenced code blocks; streaming thinking blocks; collapsible tool cards with arguments,
   results, and durations;
 - stop button, queued steering messages while a turn runs, and `/compact`;
-- session picker: create, switch, rename, and delete persisted sessions; opening a session restores
+- session picker: create, switch, rename, and remove persisted sessions; opening a session restores
   its Pi transcript and resumes the live event stream from that point, including after a gateway or
   Pi restart;
 - voice input through the system speech recognizer;
@@ -35,6 +36,12 @@ The project is a clean build. It does not extend FRESKIEL.
 
 Pi-Bolt is the intended backend on both the PC and Termux. The Android app does not bundle Node or
 run a Pi process itself.
+
+Screen context is screenshot-only. The app never reads screen text, traverses `AssistStructure`, runs
+OCR, or uses `AccessibilityService` or `MediaProjection`. A capture is staged in memory, sent only
+when you submit, and never written to preferences, files, or logs; removing it or closing the overlay
+drops it. Screen queries are ephemeral in the app, but Pi owns each session transcript on the host;
+removing a session in the app does not delete that transcript.
 
 ## Install (Termux)
 
@@ -104,10 +111,11 @@ See `gateway/README.md` for Tailscale setup and the HTTP/SSE contract.
 
 ## Docs
 
-- `docs/assistant-app-research.md` — platform APIs, role flow, screen context, MVP.
+- `docs/assistant-app-research.md` — platform API research and the role flow; background only, not
+  product behavior.
 - `docs/ui-design-report.md` — visual tokens, Compose theme, screen specs.
 - `docs/mockups/ui-board.html` — approved visual board.
-- `gateway/README.md` — Pi-Bolt gateway contract and operation.
+- `gateway/README.md` — Pi-Bolt gateway operation and Tailscale setup.
 - `AGENTS.md` — repository, commit, push, and build rules.
 
 ## Stack

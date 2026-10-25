@@ -1,10 +1,16 @@
 # Android assistant app research
 
-Status: research only. No app code has been written.
+Status: background research only. Not product behavior, not a specification.
 Date: 2026-10-22.
 Target: a phone app that the user selects as the default digital assistant, opens with the system
-assist gesture or a power-button long press (where the OEM supports it), and can read screen context
-after the user enables it.
+assist gesture or a power-button long press (where the OEM supports it), and can attach a screenshot
+after the user enables screen capture.
+
+> **Background: not product behavior.** This document records platform research from before the
+> screenshot-only decision. HELLDYE never reads screen text. The only screen context is one captured
+> screenshot, staged in memory (`docs/implementation-plan.md` §1.1). The `AssistStructure`,
+> text-extraction, and text-context material below is historical platform research; do not implement
+> it, and do not cite it as the current contract.
 
 ## 1. Executive summary
 
@@ -115,12 +121,13 @@ null value means "work without that data", never "ask again in a loop".
 2. Tap **Set as default assistant**. The system role dialog appears; confirm.
    The same result is reachable through `Settings > Apps > Default apps > Digital assistant app >
    HELLDYE`.
-3. On the same digital-assistant page, enable the screen-context options the device offers
-   (**Use text from screen**, **Use screenshot**, or a single **Screen context** toggle).
+3. On the same digital-assistant page, enable the screenshot option the device offers
+   (**Use screenshot**, or a single **Screen context** toggle). Ignore any **Use text from screen**
+   option; the product does not request text.
 4. On Pixel 4+ with Android 12+, open `Settings > System > Gestures > Press and hold power button` and
    choose **Digital assistant**.
-5. Long-press the power button. The system starts HELLDYE; the app reads the assist state only if the
-   user left screen context enabled.
+5. Long-press the power button. The system starts HELLDYE; the app requests a screenshot only if the
+   user left screen capture enabled.
 6. If the device has no power-button option, use the system assist gesture (long-press home or the
    corner swipe) instead. The app receives the same session either way.
 
@@ -213,7 +220,7 @@ data class AssistUiState(
 ```
 
 Keep the bitmap in memory only. Clear the object in `onHide()` and when the activity finishes. Do not
-persist screen text, screenshots, or URLs unless the user explicitly asks to save a result; if the
+persist screenshots or URLs unless the user explicitly asks to save a result; if the
 product needs history, store the user's question and the answer, not the captured screen.
 
 ## 5. Manifest and XML
@@ -328,9 +335,11 @@ Onboarding screen checklist:
 - Microphone permission: request `RECORD_AUDIO` here, not during an assist session.
 - Power button: on Pixel, show the exact path; on other devices, say "If your device supports it" and
   point to the assist gesture. Never claim the app can change it.
-- A short privacy note: what screen data is read, where it goes, and how to turn it off.
+- A short privacy note: what screen data is captured, where it goes, and how to turn it off.
 
-## 7. Screen context in detail
+## 7. Screen context research (background — not product behavior)
+
+> Historical. The product is screenshot-only. Do not traverse `AssistStructure` or extract text.
 
 ### 7.1 What the system sends
 
@@ -370,7 +379,7 @@ docs say the structure contains only window data and omits screen content. Decla
 set `android:usesAssistStructureScreenContent="true"` on the `<voice-interaction-service>` tag. This
 is in addition to the user's screen-context toggle, not a replacement for it.
 
-### 7.4 Extracting text
+### 7.4 Extracting text (historical, not used)
 
 ```kotlin
 private fun AssistStructure.flattenText(): String = buildString {
@@ -389,9 +398,8 @@ private fun StringBuilder.appendNode(node: AssistStructure.ViewNode?) {
 }
 ```
 
-The assistant should send the smallest useful context: the focused window's text, the web URI, and a
-screenshot only if the user enabled it and the product needs pixels. Truncate long text and drop
-duplicate lines before sending it to a model.
+The assistant should send the smallest useful context. The product sends only the screenshot, one image
+per request; the structure text, web URI, and truncation approach above are historical and are not built.
 
 ### 7.5 Privacy and safety
 
@@ -449,12 +457,12 @@ Compose rules that matter here:
 - `LaunchedEffect(sessionId)` to start listening once; `DisposableEffect` to cancel speech/TTS.
 - `BackHandler` closes the activity and calls the session close path.
 - `enableEdgeToEdge()` and `imePadding()`; the overlay must not hide the input under the keyboard.
-- Show real states: reading context, listening, thinking, answer, error, no microphone permission,
-  screen context disabled.
-- Do not use `rememberSaveable` for screen text or screenshots; they are sensitive and should not
+- Show real states: capturing a screenshot, listening, thinking, answer, error, no microphone
+  permission, screen capture disabled.
+- Do not use `rememberSaveable` for screenshots; they are sensitive and should not
   survive process death. A user-visible answer may be kept only if the product explicitly supports
   history.
-- Accessibility: label the mic, the close button, and the context chip; do not rely on color alone.
+- Accessibility: label the mic, the close button, and the screenshot strip; do not rely on color alone.
 
 ## 10. Testing and debugging
 
@@ -483,7 +491,10 @@ adb shell dumpsys activity service dev.scdeal.helldye/.voice.HelldyeVoiceInterac
 The normal user path is the system role dialog. The `cmd role` path is for development and may not be
 available on production builds.
 
-### 10.2 Test matrix
+### 10.2 Test matrix (historical)
+
+The text cases below are platform research; the product never requests text. Test only the screenshot
+and screenshot-disabled paths against the current contract.
 
 | Case | Expected |
 | --- | --- |
@@ -506,7 +517,7 @@ available on production builds.
 
 Useful tags: `VoiceInteractionService`, `AssistGesture`, `AssistStructure`, `RoleManager`,
 `VoiceInteractionSession`. Filter logcat by your package and by these tags. Do not log the captured
-text or bitmap.
+bitmap.
 
 ## 11. Risks and open questions
 
@@ -525,20 +536,23 @@ text or bitmap.
 1. Which phone/OEM and Android version is the first target? This decides whether power long-press is
    available at all.
 2. Is the assistant cloud-backed, on-device, or both? This decides the privacy and latency design.
-3. Should screen context be text-only for the first release? It is lower risk and cheaper than
-   screenshots.
+3. ~~Should screen context be text-only for the first release?~~ Resolved: screenshot-only. The image is
+   one capture, staged in memory; there is no text path (`docs/implementation-plan.md` §1.1).
 4. Does the product need keyguard invocation, or only unlocked use? Keyguard adds security review.
 5. Is a hotword required? It is a separate, much heavier feature (`AlwaysOnHotwordDetector`); the MVP
    does not need it.
 
-## 12. MVP plan
+## 12. MVP plan (historical)
+
+Superseded by `docs/implementation-plan.md`. The screen-context row below is not a target; the product
+is screenshot-only.
 
 | Phase | Deliverable | Acceptance |
 | --- | --- | --- |
 | 0 | Project skeleton, manifest, role request, onboarding | App appears in Digital assistant app and can be selected. |
 | 1 | `VoiceInteractionService`, session service, `AssistantActivity` | `adb shell input keyevent 219` opens the Compose overlay; close returns to the previous app. |
 | 2 | SpeechRecognizer + TextToSpeech | User speaks, sees a transcript, hears an answer; cancel works. |
-| 3 | Assist structure + content + optional screenshot | With context on, the overlay shows screen text/URI; with it off, the UI says so and still works. |
+| 3 | Assist structure + content + optional screenshot | Superseded: screenshot-only, no text excerpt. Historical acceptance was a screen excerpt/URI in the overlay. |
 | 4 | Backend/LLM, streaming, errors | Answer streams; cancel stops the request; no key in the APK. |
 | 5 | Power-button onboarding, settings, test matrix | Pixel power gesture documented and tested; OEM fallback documented; role loss handled. |
 | 6 | Privacy review, Play data safety, release build | No screen content in logs/storage; policy checklist complete. |

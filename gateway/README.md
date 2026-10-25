@@ -4,7 +4,8 @@ Small HTTP/SSE bridge between HELLDYE and one or more `pi-bolt --mode rpc` proce
 
 The gateway owns each Pi-Bolt process and session. The phone can disconnect, switch away, or be
 killed without aborting the work; it reconnects with `Last-Event-ID` and receives the buffered
-events. Screen text is passed through to the prompt and is not written to disk.
+events. Screen context is an image: the app sends a captured screenshot with the prompt, and the
+gateway never reads screen text or writes the image to disk.
 
 ## Run
 
@@ -95,7 +96,8 @@ All `/v1` routes require `Authorization: Bearer <token>` when a token is configu
 | `POST` | `/v1/sessions/{id}/name` | Rename the session (`name`). |
 
 `context` is prepended to the prompt as-is. The Android client wraps text files in
-`<file name="...">` before sending them; screen text is not read.
+`<file name="...">` before sending them. Screen context is not text: it arrives only as an image in
+`images`, base64-encoded. The gateway forwards the bytes and does not inspect or transform them.
 
 ## Limits
 
@@ -107,5 +109,6 @@ All `/v1` routes require `Authorization: Bearer <token>` when a token is configu
   then opens the event stream from the returned `eventId`, so old history never depends on the
   in-memory replay ring.
 - Prompts are accepted asynchronously; streamed output and command responses arrive on SSE.
-- Pi-Bolt's stderr is logged to the gateway's stderr. Do not put screen text in prompts that you do
-  not want visible in transport or Pi logs.
+- Pi-Bolt's stderr is logged to the gateway's stderr. The gateway does not log prompt bodies, but Pi
+  persists each prompt and image in its session transcript on the host; do not send content you do not
+  want retained there.
