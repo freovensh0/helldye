@@ -5,10 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
-import android.graphics.ImageDecoder
 import android.net.Uri
-import android.provider.OpenableColumns
-import android.util.Base64
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -79,7 +76,10 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import androidx.core.content.FileProvider
+import android.content.ContentValues
+import android.os.Environment
+import android.provider.MediaStore
+import dev.scdeal.helldye.assistant.FilePaths
 import dev.scdeal.helldye.R
 import dev.scdeal.helldye.assistant.AssistantUiState
 import dev.scdeal.helldye.assistant.Attachment
@@ -89,7 +89,6 @@ import dev.scdeal.helldye.assistant.Conversation
 import dev.scdeal.helldye.assistant.ConversationItem
 import dev.scdeal.helldye.assistant.ExtensionDialog
 import dev.scdeal.helldye.assistant.ExtensionWidget
-import dev.scdeal.helldye.assistant.ImageRules
 import dev.scdeal.helldye.assistant.NoticeTone
 import dev.scdeal.helldye.assistant.ScreenCaptureState
 import dev.scdeal.helldye.assistant.SlashCommand
@@ -108,12 +107,8 @@ import dev.scdeal.helldye.ui.markdown.MarkdownText
 import dev.scdeal.helldye.ui.theme.HelldyeColors
 import dev.scdeal.helldye.ui.theme.HelldyeDimens
 import dev.scdeal.helldye.ui.theme.HelldyeTheme
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.ByteArrayOutputStream
-import java.io.File
-import java.io.InputStream
 import java.util.Locale
 
 @Composable
@@ -244,40 +239,43 @@ fun AssistantScreen(
         SlashCommands.matches(slashQuery, state.commands)
     }
 
-    val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) {
-            scope.launch {
-                runCatching { readPhoto(context, uri) }
-                    .onSuccess { onAddAttachment(it) }
-                    .onFailure { onNotice(it.message ?: "Could not read the image.") }
-            }
+    fun addPathReference(uri: android.net.Uri?) {
+        if (uri == null) return
+        val path = FilePaths.resolve(context, uri)
+        if (path == null) {
+            onNotice("This provider does not expose a device path. Pick it from Gallery or type the path.")
+            return
         }
+        input = FilePaths.appendReference(input, path)
+    }
+    val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        addPathReference(uri)
     }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) {
-            scope.launch {
-                runCatching { readTextFile(context, uri) }
-                    .onSuccess { onAddAttachment(it) }
-                    .onFailure { onNotice(it.message ?: "Could not read the file.") }
-            }
-        }
+        addPathReference(uri)
     }
-    var cameraFile by remember { mutableStateOf<File?>(null) }
+    var cameraUri by remember { mutableStateOf<android.net.Uri?>(null) }
     val cameraPicker = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
-        val file = cameraFile
-        if (success && file != null) {
-            scope.launch {
-                runCatching { readCameraPhoto(file) }
-                    .onSuccess { onAddAttachment(it) }
-                    .onFailure { onNotice(it.message ?: "Could not read the photo.") }
-            }
-        }
+        if (success) addPathReference(cameraUri)
     }
     fun takePhoto() {
-        val dir = File(context.cacheDir, "camera").apply { mkdirs() }
-        val file = File(dir, "shot-${System.currentTimeMillis()}.jpg")
-        cameraFile = file
-        val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+        val name = "helldye-${System.currentTimeMillis()}.jpg"
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, name)
+            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            put(
+                MediaStore.Images.Media.RELATIVE_PATH,
+                "${Environment.DIRECTORY_PICTURES}/Helldye",
+            )
+        }
+        val uri = runCatching {
+            context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+        }.getOrNull()
+        if (uri == null) {
+            onNotice("Could not create a photo file.")
+            return
+        }
+        cameraUri = uri
         cameraPicker.launch(uri)
     }
 
@@ -1290,6 +1288,16 @@ private fun AttachmentSheet(
         AttachmentSheetRow("FILE", onFile)
         Hairline(color = HelldyeColors.LineSoft)
         AttachmentSheetRow("PASTE", onPaste)
+        Hairline(color = HelldyeColors.LineSoft)
+        Text(
+            text = "Photos and files are added as @path; nothing is uploaded. The Pi host must be able to read that path.",
+            style = MaterialTheme.typography.bodySmall,
+            color = HelldyeColors.TextMuted,
+            modifier = Modifier.padding(
+                horizontal = HelldyeDimens.ScreenPadding,
+                vertical = HelldyeDimens.Sm,
+            ),
+        )
     }
 }
 
@@ -2505,97 +2513,6 @@ private fun Composer(
             )
         }
     }
-}
-
-private suspend fun readPhoto(context: Context, uri: Uri): Attachment.Photo = withContext(Dispatchers.IO) {
-    val name = displayName(context, uri) ?: "photo"
-    readImageAttachment(
-        name = name,
-        source = ImageDecoder.createSource(context.contentResolver, uri),
-    )
-}
-
-private suspend fun readCameraPhoto(file: File): Attachment.Photo = withContext(Dispatchers.IO) {
-    readImageAttachment(name = "CAMERA", source = ImageDecoder.createSource(file))
-}
-
-/** Decodes with the platform decoder (which applies EXIF orientation), then re-encodes as JPEG. */
-private fun readImageAttachment(
-    name: String,
-    source: ImageDecoder.Source,
-): Attachment.Photo {
-    val bitmap = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
-        val size = ImageRules.scaledSize(info.size.width, info.size.height)
-        decoder.setTargetSize(size.first, size.second)
-        decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE)
-    }
-    return try {
-        encodeJpeg(name, bitmap)
-    } finally {
-        bitmap.recycle()
-    }
-}
-
-private fun encodeJpeg(name: String, bitmap: Bitmap): Attachment.Photo {
-    var current = bitmap
-    var owned = false
-    var bytes = ByteArray(0)
-    var attempts = 0
-    while (true) {
-        val output = ByteArrayOutputStream()
-        current.compress(Bitmap.CompressFormat.JPEG, ImageRules.JPEG_QUALITY, output)
-        bytes = output.toByteArray()
-        if (bytes.size <= ImageRules.MAX_BYTES_PER_IMAGE || attempts >= 4) break
-        val next = Bitmap.createScaledBitmap(
-            current,
-            ((current.width * 3) / 4).coerceAtLeast(1),
-            ((current.height * 3) / 4).coerceAtLeast(1),
-            true,
-        )
-        if (owned) current.recycle()
-        current = next
-        owned = true
-        attempts++
-    }
-    if (owned) current.recycle()
-    return Attachment.Photo(
-        name = name,
-        mimeType = "image/jpeg",
-        base64 = Base64.encodeToString(bytes, Base64.NO_WRAP),
-    )
-}
-
-private suspend fun readTextFile(context: Context, uri: Uri): Attachment.Text = withContext(Dispatchers.IO) {
-    val resolver = context.contentResolver
-    val bytes = resolver.openInputStream(uri)?.use { readLimited(it, 128 * 1024) }
-        ?: error("Could not open the file.")
-    Attachment.Text(
-        name = displayName(context, uri) ?: "file",
-        content = bytes.toString(Charsets.UTF_8),
-    )
-}
-
-private fun readLimited(input: InputStream, limit: Int): ByteArray {
-    val output = ByteArrayOutputStream()
-    val buffer = ByteArray(8 * 1024)
-    var total = 0
-    while (true) {
-        val read = input.read(buffer)
-        if (read < 0) break
-        total += read
-        if (total > limit) error("Attachment is larger than ${limit / 1024} KB.")
-        output.write(buffer, 0, read)
-    }
-    return output.toByteArray()
-}
-
-private fun displayName(context: Context, uri: Uri): String? {
-    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-        if (cursor.moveToFirst()) {
-            return cursor.getString(0)
-        }
-    }
-    return uri.lastPathSegment
 }
 
 @Preview(showBackground = false, backgroundColor = 0x00000000)
