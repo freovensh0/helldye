@@ -5,7 +5,7 @@ Scope: the assistant overlay, default-assistant onboarding, settings, and the st
 
 ## 0. Visual mockup
 
-- [`mockups/ui-board.html`](mockups/ui-board.html) — 1440×1080 web mockup board with onboarding, assistant and settings.
+- [`mockups/ui-board.html`](mockups/ui-board.html) — 1440×1080 web mockup board with the empty assistant, the screenshot strip, and settings.
 - [`mockups/ui-board.png`](mockups/ui-board.png) — rendered board.
 - [`mockups/assistant-screen.png`](mockups/assistant-screen.png) — assistant screen at 2×.
 
@@ -14,10 +14,11 @@ Scope: the assistant overlay, default-assistant onboarding, settings, and the st
 ![HELLDYE assistant screen](mockups/assistant-screen.png)
 
 The mockup is an HTML/CSS visual target, not app code. It uses the exact token values in section 4.
+The board and PNGs show the Phase 2 overlay: the empty assistant, the screenshot strip, and the flat
+settings list. They are regenerated with the design refresh; there is no older version in the repo.
 
 Screen context is screenshot-only (`docs/implementation-plan.md` §1.1): one staged capture, no text excerpt.
-The mockup board and PNGs still show the earlier text-context panel; they are regenerated in Phase 2 and
-are not the current spec.
+The screenshot strip is the only place where screen content appears.
 
 ---
 
@@ -239,7 +240,7 @@ a raw HTML look without becoming soft.
 ### 6.2 Spacing
 
 4dp base grid: `4 / 8 / 12 / 16 / 24 / 32 / 48`.
-Screen padding `20dp`; list row height `56dp`; top bar `56dp`; button min height `48dp`; assistant content max
+Screen gutter `16dp`; list row height `56dp`; top bar `56dp`; button min height `48dp`; assistant content max
 width `560dp`; line width `1dp` (use `1.dp`, not a hairline fraction that can disappear on low-density screens).
 
 ### 6.3 Separation hierarchy
@@ -511,7 +512,7 @@ No red background. At most, a `SignalDim` fill can sit behind the outline, but t
 ### 8.5 Panels and list rows
 
 - Panel: black background, 1dp `Line`, 0dp radius, 12–16dp padding. No shadow.
-- List row: 56dp min height, 20dp horizontal padding, leading icon 20dp, title `bodyLarge`, trailing meta
+- List row: 56dp min height, 16dp horizontal padding, leading icon 20dp, title `bodyLarge`, trailing meta
   `labelMedium` `TextMuted`, 1dp divider. Pressed background white 6%.
 - Section header: `labelMedium` uppercase `TextMuted`, 8dp top / 6dp bottom, no line above unless the section
   needs separation from a dense list.
@@ -522,8 +523,9 @@ No red background. At most, a `SignalDim` fill can sit behind the outline, but t
 - 56dp, black, no elevation, no shadow.
 - Back icon 24dp on the left; title `titleMedium` at 20dp; optional mono status chip on the right.
 - Bottom 1dp `Line` only when content scrolls under it.
-- Assistant overlay: wordmark `HELLDYE` in `labelLarge`, tracking +0.12em; no screen chip (the screenshot
-  strip is the state).
+- Assistant overlay: 56dp rail; wordmark `labelLarge`, session title `bodyMedium` ellipsized, state
+  `labelMedium` mono, and at most two actions (overflow and close/back). No screen chip: the screenshot
+  strip is the state. The display-size state word appears only on an empty transcript.
 
 ### 8.7 Dialogs and sheets
 
@@ -544,7 +546,8 @@ Black fill, 1dp `LineStrong`, 2dp radius, 12dp padding, one line of `bodyMedium`
   the top bar.
 - No shimmer, no skeleton pulse, no centered spinner.
 - If a region is not ready, reserve its final height and show `TextMuted` text (`LOADING`), so the layout
-  does not jump when content arrives.
+  does not jump when content arrives. An empty answer reserves a 44dp block and shows the 2dp line inside it;
+  the shell, rail, and composer stay visible.
 - Determinate progress: 2dp line, white on `Line`, numeric percentage in mono.
 
 ### 8.10 Waveform
@@ -565,82 +568,108 @@ Black fill, 1dp `LineStrong`, 2dp radius, 12dp padding, one line of `bodyMedium`
 
 ## 9. Screens
 
+### 9.0 Screenshot-only decision
+
+Screen context is screenshot-only, and the screenshot is the only screen artifact the app may send. This
+block is normative; it mirrors the screen-context rules in [`AGENTS.md`](../AGENTS.md) and
+`docs/implementation-plan.md` §1.1.
+
+- The assist gesture may capture one screenshot. The app never reads screen text: no OCR, no
+  `AssistStructure` traversal, no `AccessibilityService`, no `MediaProjection`, and no clipboard scrape of
+  the foreground app.
+- The screenshot is staged in memory and sent only when the user submits. It is never written to
+  preferences, files, logs, or the recents thumbnail; the gateway never writes it to disk.
+- The screenshot strip is the only screen-context visual. There is no text excerpt, character count, OCR
+  fallback, gallery, history, or second copy.
+- A screen query is ephemeral (`--no-session`, read-only tools) and its answer is not added to a persistent
+  transcript.
+- `TEMP` is a temporary state, not an error. `OFF` and `BLOCKED` are honest states with no retry loop; a
+  secure window or a disabled screen-context setting produces no capture.
+
 ### 9.1 Assistant overlay (primary)
 
-Full-screen, opaque black. No translucency, no blur, no dim: the user must not see the app underneath, and
-screen content is sensitive. The overlay appears immediately; there is no entrance animation.
+Full-screen, opaque `#000000`. No translucency, no blur, no dim: the user must not see the app underneath,
+and screen content is sensitive. The overlay appears immediately; there is no entrance animation.
 
-Screen context is screenshot-only. The overlay never shows screen text, a text excerpt, or a character count.
+Empty:
 
+```text
+HELLDYE                    SESSION 4F2A         READY        [⋮] [×]
+────────────────────────────────────────────────────────────────────
+READY
+Ask about the screen, or type.
+Screenshots stay on this phone until you send.
+
+MODEL · THINKING · CONTEXT                                  (tappable)
+[ + ]  Ask HELLDYE                                      [mic] [send]
 ```
-┌──────────────────────────────────────────┐
-│ HELLDYE                         SESSION  │ 56dp
-├──────────────────────────────────────────┤
-│                                          │
-│ LISTENING                                │ 40sp Space Grotesk
-│ Speak, or type.                          │ 14sp TextSecondary
-│                                          │
-│ ▁▂▃▅▂▁▃▂▁  (real RMS, 48dp)              │
-│                                          │
-│ TRANSCRIPT                               │ labelMedium
-│ "What is wrong with this layout?"        │ 18sp
-│                                          │
-│ ANSWER                                   │ labelMedium
-│ The header is taller than the content... │ 15sp/22
-│                                          │
-├──────────────────────────────────────────┤
-│ [40×40] SCREEN   TEMP   1.2 MB      [×]  │ 56dp strip
-├──────────────────────────────────────────┤
-│ [ MIC ]      TYPE              [ CLOSE ] │ 56dp
-└──────────────────────────────────────────┘
+
+With a screenshot staged and a turn:
+
+```text
+HELLDYE                    SESSION 4F2A      THINKING        [⋮] [×]
+────────────────────────────────────────────────────────────────────
+│ What is wrong with this layout?
+The rail is taller than the content. I kept one 56dp rail.
+  THINKING · 3 LINES
+  3 TOOLS · 1 FAILED
+[thumb] SCREEN   TEMP   1.2 MB                                  [×]
+MODEL · THINKING · CONTEXT
+[ + ]  Ask HELLDYE                                      [mic] [stop]
 ```
 
 Specs:
 
-- Top bar: wordmark left, session title right (ellipsized), mono state; close and one overflow at most. No
-  screen chip: the strip is the screen state.
-- Status word: `displayLarge`, one word, uppercase, `Text`. Use `LISTENING`, `THINKING`, `ANSWER`, `ERROR`.
-  This is the one bold move; do not add a second oversized element.
-- Subtitle: one short sentence, `bodyMedium`, `TextSecondary`.
-- Waveform only while listening; 48dp; real amplitude.
-- Transcript: max 3 lines, `bodyLarge` 18sp, `Text`; no bubble, no card.
-- Answer: `bodyLarge`, 15/22, `Text`; scrollable if long; no per-token animation.
-- Screenshot strip: 56dp, one line, 1dp `Line` top border, 4dp inner padding. 40×40 preview with 2dp radius and
-  1dp `Line` border; label `SCREEN` in `labelMedium`; state `TEMP` in `labelMedium` `TextMuted`; size in mono
-  `labelSmall`; remove `×` with a 48dp target and the content description "Remove screenshot".
-- The preview is the one image that will be sent. It is not a gallery, not a history, and not a second copy:
-  the strip holds at most one capture. There is no text excerpt, no character count, and no OCR.
-- If capture is off: no preview; the strip reads `SCREEN   OFF` in `TextMuted`, with one banner line
-  "Screen capture is off. Enable it in settings." Action `OPEN`; the send stays text-only.
-- If the screen is secure: no preview; the strip reads `SCREEN   BLOCKED` in `Signal`, with one banner line
-  "This screen does not allow screenshots." No retry loop.
-- Remove drops the image immediately and hides the strip.
-- Bottom bar: 48dp square mic button (2dp radius, 1dp `LineStrong`, white mic icon; recording state: `Signal`
-  dot + `STOP` label), `TYPE` ghost button, `CLOSE` ghost button. Keep three controls maximum.
-- No screenshot means the assistant answers without one; never claim an image was attached.
-- If no microphone permission: `GRANT MIC` secondary button in the bottom bar; no hidden failure.
-- Back closes the assistant; state is not retained in recents. Use `FLAG_SECURE` and `excludeFromRecents` when
-  the overlay can display a captured screenshot.
-
-The overlay's background stays opaque even with no screenshot staged; a dimmed background would expose the
-app underneath and is not part of this design.
+- **Top rail:** 56dp, 16dp gutter. Wordmark `labelLarge`; session title `bodyMedium`, one line,
+  ellipsized; state `labelMedium` mono. At most two actions: overflow and close/back. Settings, sessions,
+  and "open session" live in the overflow. No duplicate screen chip. The display-size state word appears
+  only when the transcript is empty. At 2.0× font scale the wordmark drops so the session title and
+  state stay readable; nothing clips.
+- **Turns:** no fill and no border. The user turn is a 2dp `White` left rule plus `bodyLarge` text. The
+  assistant turn is plain markdown. 16dp between turns. No `YOU`/`HELLDYE` label per turn; speaker
+  placement and the user rule carry the role.
+- **Thinking:** one-line disclosure with a 1dp `LineSoft` top rule: `THINKING · 3 LINES`. Expand inline;
+  the expanded text uses `bodyMedium` `TextMuted`. No fill.
+- **Tools:** one-line row with a 1dp `LineSoft` top rule: name, duration, status, one-line summary. Failed
+  status uses `Signal` text, never a filled panel. Consecutive tools collapse to `3 TOOLS · 1 FAILED` and
+  expand inline to the individual rows.
+- **Screenshot strip:** 56dp minimum, 1dp `Line` border, 2dp radius, 40×40 preview with a 1dp border,
+  `SCREEN`, `TEMP`/`OFF`/`BLOCKED`, size in mono, and a 48dp remove target. One image only. `TEMP` is
+  `TextMuted`; `BLOCKED` is `Signal`; there is no retry loop. Removing the strip drops the image.
+- **Composer:** attach, input, mic, send/stop only. 1dp `LineStrong` border, 2dp radius, 48dp minimum,
+  4dp inner padding. Send becomes stop while busy. No duplicate type/close controls.
+- **Status line:** one line above the composer, `labelSmall` mono `TextMuted`, data only
+  (`MODEL · THINKING · CONTEXT`). It is tappable and opens the model sheet, which also exposes the
+  thinking level. Settings is in the overflow, not the attachment sheet.
+- **Empty state:** plain content, no card and no border: `READY` in `displayLarge`, one sentence, one
+  screenshot hint, and the composer.
+- **Status rail:** one line, red only for failure: `SEND FAILED · RETRY` when the failure state exists;
+  `RECONNECTING` and `OFFLINE` when Phase 4/7 wires those states. Until then the same rail shows the
+  current error or notice with `DISMISS`.
+- **Loading:** the shell, rail, and composer stay visible. Only an empty answer shows the 2dp indeterminate
+  line, inside a reserved 44dp block. No shimmer, no skeleton, no `…`, no entrance animation.
+- **No screenshot:** the assistant answers text-only; the UI never claims an image was attached.
+- **Off/blocked:** the strip shows `SCREEN OFF` or `SCREEN BLOCKED` once; text-only send remains available;
+  there is no automatic retry.
+- The overlay stays opaque even when no screenshot is staged; a dimmed background would expose the app
+  underneath and is not part of this design.
 
 ### 9.2 Onboarding / default assistant
 
 One scrollable screen, no carousel, no illustrations. The role and permission state are the content.
 
-```
+```text
 HELLDYE
 
 Your assistant, on your terms.
-[one sentence about local processing / screenshot context]
+Screen context is one screenshot. It leaves the device only when you send it.
 
 DEFAULT ASSISTANT          NOT SET        [ SET ]
-SCREEN CAPTURE             OFF            [ OPEN ]
+SCREEN CONTEXT             SYSTEM CONTROLLED  [ OPEN ]
 MICROPHONE                 MISSING        [ GRANT ]
 ─────────────────────────────────────────────────
 [ SET AS DEFAULT ASSISTANT ]        (primary, white)
-[ OPEN ASSISTANT SETTINGS ]         (secondary)
+[ OPEN SYSTEM SETTINGS ]            (secondary)
 ```
 
 - Wordmark: `HELLDYE` in `labelLarge` with +0.12em tracking; 1dp red baseline under the `H` only.
@@ -648,62 +677,63 @@ MICROPHONE                 MISSING        [ GRANT ]
 - Body: `bodyLarge` `TextSecondary`, 2–3 sentences max.
 - Rows: 56dp, label `bodyLarge`, state `labelMedium` mono (`NOT SET`, `OFF`, `MISSING`), action `Ghost`.
 - Primary action: white fill, black text, 2dp radius; only one.
-- If the role is unavailable: replace the primary with a `WarningBanner`: "This device does not allow third-party
-  assistants." Action `OPEN DEFAULT APPS`. Do not show a dead primary button.
+- If the role is unavailable: replace the primary with a `WarningBanner`: "This device does not allow
+  third-party assistants." Action `OPEN DEFAULT APPS`. Do not show a dead primary button.
 - If the role is held: primary becomes `OPEN ASSISTANT` and a `StatusChip` shows `DEFAULT`.
-- Screen capture is system-controlled. Do not show a Switch; show status + `OPEN` and deep-link to the system
-  default-assistant screen where the toggle lives. The product requests a screenshot only; it never asks for
-  screen text.
-- No permission request on first frame; request only after the user taps the row action. Show the system dialog
-  and update the row immediately on return.
+- Screen capture is system-controlled and screenshot-only. Do not show a Switch; show status + `OPEN` and
+  deep-link to the system default-assistant screen where the toggle lives. The product requests a
+  screenshot only; it never asks for screen text.
+- No permission request on first frame; request only after the user taps the row action. Show the system
+  dialog and update the row immediately on return.
 
 ### 9.3 Settings
 
-```
+```text
 SETTINGS
 
-ASSISTANT
-  Default assistant            NOT SET        CHANGE
-  Open on assist gesture       ON
-SCREEN CAPTURE
-  Screen access                OFF            OPEN
-  Screen text                  NEVER READ
-VOICE
-  Microphone                   GRANTED
-  Language                     EN
+GATEWAY
+  Gateway URL                 https://phone.tailnet.ts.net
+  Token                       ••••••••
+  Workspace                   /home/you/code
+  [ SAVE ]                    (primary, white)
+  [ TEST CONNECTION ]         (secondary)
 PRIVACY
-  History                      OFF
-  Clear local data                            CLEAR
+  Screen context              SCREENSHOT ONLY
+  Screenshots                 MEMORY ONLY
 ABOUT
-  Version                      0.1.0
+  Version                     0.1.0
 ```
 
-- Top bar `SETTINGS`, 56dp, back icon.
-- Section labels `labelMedium` uppercase `TextMuted`; 1dp `Line` between sections, not between every row.
-- Rows 56dp; title `bodyLarge`; state `labelMedium`; action `Ghost` or a 24dp icon.
-- Toggles: custom 40×22dp track, 2dp radius, 1dp `LineStrong`; on: white track + black knob; off: black track +
-  `TextMuted` knob. No Material purple. Minimum 48dp touch target around the toggle.
-- Screen access row is informational; it cannot be toggled in-app. `OPEN` goes to the system screen.
-- `Clear local data` opens a dialog with a `WarningBanner`; confirm button is `Danger` outline, not filled red.
-- No cards around groups. No "hero" header. The list is the screen.
+- Top rail 56dp: back icon + `SETTINGS` in `labelLarge`.
+- One flat list, 16dp gutter. Sections are separated by one 1dp `LineSoft` rule; rows are 56dp minimum and
+  are not cards.
+- Section labels `labelMedium` uppercase `TextMuted`; row title `bodyLarge`; state `labelMedium` mono.
+- Token is masked; it never renders in clear text. Host profile details are rows, not cards.
+- One primary action per screen: `SAVE`. `TEST CONNECTION` is secondary. No cards around groups.
+- Screen-context rows are informational; they cannot be toggled in-app. `OPEN` goes to the system screen.
+- `Clear local data` opens a dialog with a `WarningBanner`; the confirm button is `Danger` outline, not
+  filled red.
 
 ### 9.4 States matrix
 
 | State | Visual | Copy | Action |
 |---|---|---|---|
-| Idle | Status `READY`, no waveform | "Hold the assist gesture or tap the mic." | `MIC` |
-| Listening | `LISTENING`, real waveform, red dot if recording | "Speak, or type." | `STOP` |
-| Thinking | `THINKING`, 2dp indeterminate line, layout reserved | "Sending the screenshot..." | `CANCEL` |
-| Answer | `ANSWER`, content, no animation | Answer text | `ASK AGAIN` |
-| Capture off | `SCREEN OFF` strip state + one-line banner | "Screen capture is off. Enable it in settings." | `OPEN` |
-| Secure screen | `SCREEN BLOCKED` strip state + one-line banner | "This screen does not allow screenshots." | `DISMISS` |
-| No mic permission | Warning banner | "Microphone permission is missing." | `GRANT` |
+| Empty | Plain `READY` display word, no card or border | "Ask about the screen, or type." + screenshot hint | composer |
+| Thinking | Rail `THINKING`; reserved 44dp answer block with 2dp line | No `…`; the shell stays visible | `STOP` |
+| Answer | Plain markdown; user 2dp rule; 16dp between turns | Answer text | `ASK AGAIN` |
+| Screenshot staged | 56dp strip, 40×40 preview, `SCREEN TEMP` | "One screenshot is staged. It is sent only when you send." | `×` remove |
+| Capture off | Strip `SCREEN OFF` (Phase 3), no preview | "Screen capture is off. Enable it in settings." | `OPEN` |
+| Secure screen | Strip `SCREEN BLOCKED` in `Signal` (Phase 3), no preview | "This screen does not allow screenshots." | none |
+| Send failed | One-line rail `SEND FAILED · RETRY` in `Signal`; retry wiring lands with Phase 4 | What failed + one next step | `RETRY` or `DISMISS` |
+| Reconnecting / offline | One-line rail, `TextMuted`; Phase 4/7 | `RECONNECTING` / `OFFLINE` | none |
+| No mic permission | One-line rail | "Microphone permission is missing." | `GRANT` |
 | No assistant role | Warning banner on onboarding | "This device does not allow third-party assistants." | `OPEN DEFAULT APPS` |
-| Empty history | `HISTORY` label, 24dp icon, one line | "No saved sessions." | none |
-| Error | `ERROR`, warning banner | What failed + one next step | `RETRY` or `OPEN SETTINGS` |
+| Empty sessions | Flat sheet, one line | "No sessions match." | `NEW SESSION` |
+| Error | One-line rail, `Signal` text | What failed + one next step | `DISMISS` |
 
-Loading never replaces the whole screen. The shell, top bar, and status remain visible; only the content region
-shows the 2dp line or reserved space.
+Loading never replaces the whole screen. The shell, top rail, and composer remain visible; only the content
+region shows the 2dp line or reserved space. Red is reserved for failure and blocked states; `TEMP` is not
+an error.
 
 ---
 
@@ -839,7 +869,7 @@ val HelldyeShapes = Shapes(
 
 object HelldyeDimens {
     val Hairline = 1.dp
-    val ScreenPadding = 20.dp
+    val ScreenPadding = 16.dp
     val Gutter = 12.dp
     val Xs = 4.dp
     val Sm = 8.dp
