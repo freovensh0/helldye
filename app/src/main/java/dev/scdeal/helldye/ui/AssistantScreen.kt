@@ -55,6 +55,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -150,6 +151,7 @@ fun AssistantScreen(
     var input by rememberSaveable { mutableStateOf("") }
     var attachmentMenu by rememberSaveable { mutableStateOf(false) }
     var overflowOpen by rememberSaveable { mutableStateOf(false) }
+    var pinnedToBottom by rememberSaveable { mutableStateOf(true) }
     val listState = rememberLazyListState()
     val keyboard = LocalSoftwareKeyboardController.current
     val context = LocalContext.current
@@ -288,18 +290,31 @@ fun AssistantScreen(
     }
     val railState = when {
         state.screenQuery -> "TEMP"
+        state.stopping -> "STOPPING"
         state.streaming -> "THINKING"
         screenState == ScreenCaptureState.Ready || screenState == ScreenCaptureState.Sent -> "TEMP"
         else -> "READY"
     }
     val lastMessage = (state.messages + state.screenMessages).lastOrNull()
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+            if (!scrolling) {
+                pinnedToBottom = Conversation.shouldPinToBottom(
+                    lastVisibleIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1,
+                    totalItems = listState.layoutInfo.totalItemsCount,
+                )
+            }
+        }
+    }
     LaunchedEffect(
         conversation.size,
         lastMessage?.text?.length,
         lastMessage?.thinking?.length,
         lastMessage?.tool?.result?.length,
     ) {
-        if (conversation.isNotEmpty()) listState.scrollToItem(conversation.lastIndex)
+        if (conversation.isNotEmpty() && pinnedToBottom) {
+            listState.scrollToItem(conversation.lastIndex)
+        }
     }
 
     LaunchedEffect(state.editorPrefill) {
@@ -339,38 +354,59 @@ fun AssistantScreen(
                 )
                 Hairline(color = HelldyeColors.LineSoft)
 
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    contentPadding = PaddingValues(
-                        start = HelldyeDimens.ScreenPadding,
-                        top = HelldyeDimens.Lg,
-                        end = HelldyeDimens.ScreenPadding,
-                        bottom = HelldyeDimens.Md,
-                    ),
-                    verticalArrangement = Arrangement.spacedBy(HelldyeDimens.Lg),
-                ) {
-                    if (state.messages.isEmpty() && state.screenMessages.isEmpty()) {
-                        item(key = "empty") {
-                            EmptyState(
-                                overlay = overlay,
-                                screenState = screenState,
+                Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(
+                            start = HelldyeDimens.ScreenPadding,
+                            top = HelldyeDimens.Lg,
+                            end = HelldyeDimens.ScreenPadding,
+                            bottom = HelldyeDimens.Md,
+                        ),
+                        verticalArrangement = Arrangement.spacedBy(HelldyeDimens.Lg),
+                    ) {
+                        if (state.messages.isEmpty() && state.screenMessages.isEmpty()) {
+                            item(key = "empty") {
+                                EmptyState(
+                                    overlay = overlay,
+                                    screenState = screenState,
+                                )
+                            }
+                        }
+                        items(
+                            items = conversation,
+                            key = { it.key },
+                            contentType = { if (it is ConversationItem.Tools) "tools" else "turn" },
+                        ) { item ->
+                            when (item) {
+                                is ConversationItem.Turn -> TurnBlock(item.message, state.streaming)
+                                is ConversationItem.Tools -> ToolGroupBlock(item)
+                            }
+                        }
+                        if (state.streaming && lastMessage?.role == ChatRole.User) {
+                            item(key = "waiting") {
+                                WaitingAnswer()
+                            }
+                        }
+                    }
+
+                    if (!pinnedToBottom && conversation.isNotEmpty()) {
+                        TextButton(
+                            onClick = {
+                                scope.launch { listState.animateScrollToItem(conversation.lastIndex) }
+                                pinnedToBottom = true
+                            },
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = HelldyeDimens.Md)
+                                .heightIn(min = HelldyeDimens.TouchTarget),
+                        ) {
+                            Text(
+                                text = "NEW",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = HelldyeColors.TextSecondary,
                             )
-                        }
-                    }
-                    items(
-                        items = conversation,
-                        key = { it.key },
-                        contentType = { if (it is ConversationItem.Tools) "tools" else "turn" },
-                    ) { item ->
-                        when (item) {
-                            is ConversationItem.Turn -> TurnBlock(item.message, state.streaming)
-                            is ConversationItem.Tools -> ToolGroupBlock(item)
-                        }
-                    }
-                    if (state.streaming && lastMessage?.role == ChatRole.User) {
-                        item(key = "waiting") {
-                            WaitingAnswer()
                         }
                     }
                 }

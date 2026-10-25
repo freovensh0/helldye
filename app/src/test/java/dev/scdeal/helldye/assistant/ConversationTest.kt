@@ -53,4 +53,12 @@ class ConversationTest {
             ),
         )
     }
+
+    @Test
+    fun `the transcript stays pinned only near the bottom`() {
+        assertTrue(Conversation.shouldPinToBottom(lastVisibleIndex = 8, totalItems = 10))
+        assertTrue(Conversation.shouldPinToBottom(lastVisibleIndex = 9, totalItems = 10))
+        assertTrue(Conversation.shouldPinToBottom(lastVisibleIndex = 0, totalItems = 0))
+        assertTrue(!Conversation.shouldPinToBottom(lastVisibleIndex = 3, totalItems = 10))
+    }
 }
