@@ -10,11 +10,13 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
@@ -43,6 +45,7 @@ abstract class AssistantHostActivity : ComponentActivity() {
     private val viewModel: AssistantViewModel by viewModels()
     private var keepDraftOnDestroy = false
     private var unlocked by mutableStateOf(false)
+    private var unlockNotice by mutableStateOf<String?>(null)
     private val keyguard: KeyguardManager? by lazy { getSystemService(KeyguardManager::class.java) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -51,6 +54,11 @@ abstract class AssistantHostActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
         )
         super.onCreate(savedInstanceState)
+        if (overlay) {
+            // The overlay must be reachable above the keyguard; content stays behind the gate.
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        }
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         unlocked = keyguard?.isKeyguardLocked != true
 
@@ -61,6 +69,7 @@ abstract class AssistantHostActivity : ComponentActivity() {
                 } else {
                     LockedGate(
                         canUnlock = keyguard?.isDeviceSecure == true,
+                        notice = unlockNotice,
                         onUnlock = ::requestUnlock,
                         onClose = { finish() },
                     )
@@ -135,6 +144,7 @@ abstract class AssistantHostActivity : ComponentActivity() {
     private fun requestUnlock() {
         val manager = keyguard ?: return
         if (!manager.isDeviceSecure) return
+        unlockNotice = null
         manager.requestDismissKeyguard(
             this,
             object : KeyguardManager.KeyguardDismissCallback() {
@@ -142,9 +152,13 @@ abstract class AssistantHostActivity : ComponentActivity() {
                     unlocked = true
                 }
 
-                override fun onDismissError() = Unit
+                override fun onDismissError() {
+                    unlockNotice = "Could not dismiss the screen lock. Unlock the device, then try again."
+                }
 
-                override fun onDismissCancelled() = Unit
+                override fun onDismissCancelled() {
+                    unlockNotice = "Unlock cancelled. Unlock the device, then try again."
+                }
             },
         )
     }
@@ -165,6 +179,7 @@ abstract class AssistantHostActivity : ComponentActivity() {
 @Composable
 private fun LockedGate(
     canUnlock: Boolean,
+    notice: String?,
     onUnlock: () -> Unit,
     onClose: () -> Unit,
 ) {
@@ -194,6 +209,22 @@ private fun LockedGate(
             style = MaterialTheme.typography.bodyMedium,
             color = HelldyeColors.TextSecondary,
         )
+        if (notice != null) {
+            Spacer(Modifier.height(HelldyeDimens.Md))
+            Text(
+                text = notice,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(
+                        HelldyeDimens.Hairline,
+                        HelldyeColors.SignalLine,
+                        MaterialTheme.shapes.small,
+                    )
+                    .padding(HelldyeDimens.Md),
+                style = MaterialTheme.typography.bodyMedium,
+                color = HelldyeColors.Signal,
+            )
+        }
         Spacer(Modifier.height(HelldyeDimens.Xl))
         if (canUnlock) {
             HelldyeButton(
