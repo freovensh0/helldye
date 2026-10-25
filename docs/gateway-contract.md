@@ -40,6 +40,7 @@ never a command-line argument, and never enters the Pi child environment.
 | `GET` | `/v1/info` | — | `200` `{version, piVersion, capabilities}` |
 | `GET` | `/v1/sessions` | — | `200`, array of `SessionInfo`, newest `created` first |
 | `POST` | `/v1/sessions` | `{cwd?, ephemeral?}` | `200` `SessionInfo` |
+| `POST` | `/v1/sessions/import` | — | `200` `{imported: [SessionInfo]}`; scans `HELLDYE_PI_SESSION_DIR` |
 | `GET` | `/v1/sessions/{id}` | — | `200` `SessionInfo` |
 | `DELETE` | `/v1/sessions/{id}` | — | `200` `{removed:true, transcriptKept:true}` |
 | `GET` | `/v1/sessions/{id}/events` | `?replay=true|false`, `Last-Event-ID` | `200` SSE |
@@ -62,7 +63,8 @@ never a command-line argument, and never enters the Pi child environment.
 ```json
 {
   "id": "uuid", "name": "Session 4F2A", "cwd": "/absolute/path",
-  "status": "running|idle|stopped", "started": true, "busy": true, "created": 1760000000
+  "status": "running|idle|stopped", "started": true, "busy": true,
+  "onHost": false, "created": 1760000000
 }
 ```
 
@@ -74,7 +76,9 @@ never a command-line argument, and never enters the Pi child environment.
   prompt. A rename is the only way to set a custom name, and it records that the name is explicit.
 - A state file from an older gateway has no explicit-name marker, so every stored name is replaced
   with the neutral form on load; the old prompt text is never displayed or passed to Pi.
-- `created` is Unix seconds.
+- `onHost` is true for records imported from `HELLDYE_PI_SESSION_DIR`. They are read-only metadata
+  until a prompt starts them; removing one only removes the gateway record.
+- `created` is Unix seconds (imported records use the session file timestamp).
 
 ### 2.1.1 Info
 
@@ -83,11 +87,14 @@ never a command-line argument, and never enters the Pi child environment.
 ```json
 {
   "version": "0.1.0",
+  "protocolVersion": 1,
+  "minimumProtocolVersion": 1,
   "piVersion": null,
   "epoch": "gateway-instance-uuid",
   "capabilities": {
     "sessions": true, "images": true, "structuredContext": true, "workspaceAllowlist": true,
-    "ephemeralSessions": true, "import": false, "fork": false, "export": false
+    "ephemeralSessions": true, "import": true, "fork": false, "clone": false,
+    "tree": false, "export": false
   }
 }
 ```
@@ -166,6 +173,16 @@ and without SSE subscribers. The session record is kept; the next prompt starts 
 - `eventId` is the per-session event id at the moment Pi answered. Open the event stream with
   `Last-Event-ID: 42` to receive events after the transcript snapshot.
 - `started:false` means Pi is stopped; the gateway never spawns it for this route.
+
+### 2.5.1 Host import
+
+`POST /v1/sessions/import` is explicit; the gateway never scans automatically. It reads up to 500
+`*.jsonl` files under `HELLDYE_PI_SESSION_DIR` (max depth 3, files up to 2 MB), extracts only the first
+top-level `cwd` and the latest `timestamp`/`updated`/`mtime` from each line set, ignores malformed and
+trailing partial lines, and validates the `cwd` against `HELLDYE_WORKSPACES`. Valid files become
+`onHost: true` records with a neutral name; existing ids are skipped, so a removed import does not
+reappear until imported again. No Pi process is started and no transcript is read into the response.
+If the env var is unset or not a directory the route returns `400`.
 
 ### 2.6 Rename
 
@@ -257,7 +274,8 @@ The app surfaces `HTTP <code>: <body>`; do not parse the body for branching.
 
 - The gateway writes no prompt, image, or transcript to its own disk path. Pi owns transcripts.
 - `sessions.json` (`HELLDYE_STATE_FILE` or `~/.local/share/helldye/sessions.json`) stores only
-  `id`, `name`, `cwd`, `created`, and whether the name is explicit. It is rewritten in full on create,
+  `id`, `name`, `cwd`, `created`, whether the name is explicit, the last-known model/thinking, and
+  whether the record was imported (`on_host`). It is rewritten in full on create,
   rename, delete, and state migration. The write is atomic (temp file, fsync, rename, directory fsync)
   and serialized, so a crash leaves either the previous file or the new one.
 - An ephemeral screen-query session never enters `sessions.json` and never appears in the session
@@ -315,6 +333,11 @@ screen-attachment feature needs an explicit retention decision first.
 
 ## 8. One writer
 
+- The gateway takes an advisory lock for its state directory (`gateway.lock`, a Unix socket next to
+  `sessions.json`) and refuses to start while another live gateway owns it. A stale socket from a dead
+  process is replaced after a failed connect.
+- `/state` serves the last-known model and thinking level for a stopped session from
+  `sessions.json`, so the composer is truthful without spawning Pi.
 - The gateway is the only writer to a live Pi session. It spawns one child per session with
   `--session-id` and owns its stdin and stdout.
 - Do not run a second writer against the same session (for example the Pi TUI) while the gateway is

@@ -18,6 +18,7 @@ data class GatewaySession(
     val cwd: String,
     val status: String,
     val created: Long = 0,
+    val onHost: Boolean = false,
 )
 
 data class GatewayImage(
@@ -162,21 +163,27 @@ class GatewayClient(private val config: GatewayConfig) {
         request("DELETE", "/sessions/$sessionId")
     }
 
-    fun sessions(): List<GatewaySession> {
-        val array = requestArray("GET", "/sessions")
-        return buildList {
-            for (index in 0 until array.length()) {
-                val session = array.optJSONObject(index) ?: continue
-                add(
-                    GatewaySession(
-                        id = session.optString("id"),
-                        name = session.optString("name"),
-                        cwd = session.optString("cwd"),
-                        status = session.optString("status"),
-                        created = session.optLong("created"),
-                    ),
-                )
-            }
+    fun sessions(): List<GatewaySession> = sessionArray(requestArray("GET", "/sessions"))
+
+    /** Explicit host import; the gateway scans `HELLDYE_PI_SESSION_DIR` without spawning Pi. */
+    fun importSessions(): List<GatewaySession> {
+        val response = request("POST", "/sessions/import", JSONObject())
+        return sessionArray(response.optJSONArray("imported") ?: JSONArray())
+    }
+
+    private fun sessionArray(array: JSONArray): List<GatewaySession> = buildList {
+        for (index in 0 until array.length()) {
+            val session = array.optJSONObject(index) ?: continue
+            add(
+                GatewaySession(
+                    id = session.optString("id"),
+                    name = session.optString("name"),
+                    cwd = session.optString("cwd"),
+                    status = session.optString("status"),
+                    created = session.optLong("created"),
+                    onHost = session.optBoolean("onHost", false),
+                ),
+            )
         }
     }
 
