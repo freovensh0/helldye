@@ -1020,7 +1020,8 @@ async fn ensure_started(state: &AppState, session: &Arc<Session>) -> Result<(), 
         Path::new(&session.cwd),
         &session.id,
         &name,
-        env::vars(),
+        env::vars_os()
+            .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?))),
     )
     .spawn()
     .map_err(|error| format!("failed to start {}: {error}", state.pi_bin))?;
