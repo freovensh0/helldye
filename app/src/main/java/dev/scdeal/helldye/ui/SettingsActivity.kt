@@ -84,6 +84,7 @@ class SettingsActivity : ComponentActivity() {
                 var success by remember { mutableStateOf(true) }
                 val context = LocalContext.current
                 var assistantActive by remember { mutableStateOf(assistantIsActive(context)) }
+                var readAnswers by remember { mutableStateOf(store.readAnswersEnabled()) }
                 val scope = rememberCoroutineScope()
                 LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
                     assistantActive = assistantIsActive(context)
@@ -101,6 +102,11 @@ class SettingsActivity : ComponentActivity() {
                         } else {
                             startActivity(Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS))
                         }
+                    },
+                    readAnswers = readAnswers,
+                    onToggleReadAnswers = {
+                        readAnswers = !readAnswers
+                        store.setReadAnswers(readAnswers)
                     },
                     onConfigChange = {
                         config = it
@@ -153,6 +159,8 @@ private fun SettingsScreen(
     success: Boolean,
     assistantActive: Boolean,
     onOpenAssistantSettings: () -> Unit,
+    readAnswers: Boolean,
+    onToggleReadAnswers: () -> Unit,
     onConfigChange: (GatewayConfig) -> Unit,
     onSave: () -> Unit,
     onTest: () -> Unit,
@@ -283,6 +291,24 @@ private fun SettingsScreen(
         Spacer(Modifier.height(HelldyeDimens.Xl))
         Hairline(color = HelldyeColors.LineSoft)
         Spacer(Modifier.height(HelldyeDimens.Md))
+        SectionLabel("SPEECH")
+        SettingRow(name = "Read answers", state = if (readAnswers) "ON" else "OFF")
+        Spacer(Modifier.height(HelldyeDimens.Sm))
+        Text(
+            text = "Off by default. Reads the final answer only, skips code blocks, and stops when you leave the session.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = HelldyeColors.TextSecondary,
+        )
+        Spacer(Modifier.height(HelldyeDimens.Sm))
+        HelldyeButton(
+            text = if (readAnswers) "TURN READ-ALOUD OFF" else "TURN READ-ALOUD ON",
+            onClick = onToggleReadAnswers,
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        Spacer(Modifier.height(HelldyeDimens.Xl))
+        Hairline(color = HelldyeColors.LineSoft)
+        Spacer(Modifier.height(HelldyeDimens.Md))
         SectionLabel("ABOUT")
         SettingRow(name = "Version", state = BuildConfig.VERSION_NAME)
 
@@ -364,6 +390,8 @@ private fun SettingsPreview() {
             success = true,
             assistantActive = true,
             onOpenAssistantSettings = {},
+            readAnswers = false,
+            onToggleReadAnswers = {},
             onConfigChange = {},
             onSave = {},
             onTest = {},

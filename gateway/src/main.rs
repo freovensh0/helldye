@@ -13,8 +13,9 @@ use std::{
 
 use axum::{
     Json, Router,
+    body::Body,
     extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{
         IntoResponse, Response,
@@ -472,6 +473,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(session_worktrees).post(create_worktree),
         )
         .route("/v1/sessions/{id}/allow_edits", post(set_allow_edits))
+        .route("/v1/sessions/{id}/tree", get(session_tree))
+        .route("/v1/sessions/{id}/export", get(session_export))
         .route(
             "/v1/sessions/{id}/thinking",
             get(session_thinking).post(set_session_thinking),
@@ -672,7 +675,9 @@ fn info_payload() -> Value {
             "ephemeralSessions": true,
             "import": true,
             "fork": false,
-            "export": false,
+            "clone": false,
+            "tree": true,
+            "export": true,
         },
     })
 }
@@ -786,6 +791,91 @@ fn parse_session_metadata(bytes: &[u8]) -> (Option<String>, Option<u64>) {
         }
     }
     (cwd, updated)
+}
+
+/// Finds the Pi JSONL file for a session id. The file name ends with `_<id>.jsonl`.
+fn find_host_session(root: &Path, id: &str) -> Option<PathBuf> {
+    let suffix = format!("_{id}.jsonl");
+    let mut stack = vec![root.to_path_buf()];
+    let mut visited = 0usize;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            if visited > 500 {
+                return None;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                if dir.components().count() < root.components().count() + 3 {
+                    stack.push(entry.path());
+                }
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.ends_with(&suffix) && metadata.len() <= 16_000_000 {
+                return Some(entry.path());
+            }
+        }
+    }
+    None
+}
+
+/// Walks the append-ordered parent chain from the last entry so branched sessions serve the active
+/// leaf only. Malformed and trailing partial lines are skipped.
+fn parse_host_messages(bytes: &[u8]) -> Vec<Value> {
+    let mut entries: Vec<(String, Option<String>, Value)> = Vec::new();
+    for line in bytes.split(|byte| *byte == b'\n') {
+        let Ok(value) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) != Some("message") {
+            continue;
+        }
+        let Some(message) = value.get("message").cloned() else {
+            continue;
+        };
+        let Some(id) = value.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let parent = value
+            .get("parentId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        entries.push((id.to_string(), parent, message));
+    }
+    let Some((leaf, _, _)) = entries.last() else {
+        return Vec::new();
+    };
+    let by_id: HashMap<&str, (&Option<String>, &Value)> = entries
+        .iter()
+        .map(|(id, parent, message)| (id.as_str(), (parent, message)))
+        .collect();
+    let mut chain = Vec::new();
+    let mut cursor = Some(leaf.as_str());
+    while let Some(id) = cursor {
+        let Some((parent, message)) = by_id.get(id) else {
+            break;
+        };
+        chain.push((*message).clone());
+        cursor = parent.as_deref();
+        if chain.len() > 5_000 {
+            break;
+        }
+    }
+    chain.reverse();
+    chain
+}
+
+fn read_host_messages(root: &Path, id: &str) -> Option<Vec<Value>> {
+    let path = find_host_session(root, id)?;
+    let bytes = std::fs::read(path).ok()?;
+    Some(parse_host_messages(&bytes))
 }
 
 fn scan_import_dir(
@@ -1368,6 +1458,102 @@ async fn set_allow_edits(
     Ok(Json(json!({ "allowEdits": body.enabled })))
 }
 
+/// Flat, indented view of Pi's session tree. Message bodies are never returned.
+async fn session_tree(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let session = lookup_started(&state, &id).await?;
+    let response = session
+        .request(json!({ "type": "get_tree" }), Duration::from_secs(15))
+        .await
+        .map_err(bad_gateway)?;
+    let data = command_data(response)?;
+    let leaf = data
+        .get("leafId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let mut nodes = Vec::new();
+    let mut count = 0usize;
+    if let Some(tree) = data.get("tree") {
+        flatten_tree(tree, 0, &mut count, &mut nodes);
+    }
+    for node in &mut nodes {
+        if node.get("id").and_then(Value::as_str) == Some(leaf.as_str()) {
+            node["leaf"] = json!(true);
+        }
+    }
+    Ok(Json(json!({ "nodes": nodes, "leafId": leaf })))
+}
+
+fn flatten_tree(value: &Value, depth: usize, count: &mut usize, out: &mut Vec<Value>) {
+    if *count >= 2_000 {
+        return;
+    }
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                flatten_tree(item, depth, count, out);
+            }
+        }
+        Value::Object(node) => {
+            if let Some(entry) = node.get("entry") {
+                let id = entry.get("id").and_then(Value::as_str).unwrap_or_default();
+                let kind = entry.get("type").and_then(Value::as_str).unwrap_or("entry");
+                let role = entry
+                    .get("message")
+                    .and_then(|message| message.get("role"))
+                    .and_then(Value::as_str);
+                out.push(json!({
+                    "id": id,
+                    "type": kind,
+                    "role": role,
+                    "depth": depth,
+                    "label": node.get("label").and_then(Value::as_str),
+                    "leaf": false,
+                }));
+                *count += 1;
+            }
+            if let Some(children) = node.get("children") {
+                flatten_tree(children, depth + 1, count, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Explicit export: Pi renders HTML to a temp path, the gateway streams it, then deletes it.
+async fn session_export(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Response, (StatusCode, String)> {
+    let session = lookup_started(&state, &id).await?;
+    let output = std::env::temp_dir().join(format!("helldye-export-{}.html", Uuid::new_v4()));
+    let response = session
+        .request(
+            json!({ "type": "export_html", "outputPath": output.to_string_lossy() }),
+            Duration::from_secs(30),
+        )
+        .await
+        .map_err(bad_gateway)?;
+    command_data(response)?;
+    let html = std::fs::read(&output).unwrap_or_default();
+    let _ = std::fs::remove_file(&output);
+    if html.is_empty() {
+        return Err((StatusCode::BAD_GATEWAY, "export produced no HTML".into()));
+    }
+    if html.len() > 20_000_000 {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE, "export is too large".into()));
+    }
+    let mut response = Response::new(Body::from(html));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    Ok(response)
+}
+
 async fn session_state(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -1649,11 +1835,26 @@ async fn session_messages(
     let session = lookup_owned(&state, &id).await?;
     let epoch = state.epoch.clone();
     if session.stdin.lock().await.is_none() {
+        // A stopped session serves its Pi JSONL transcript from disk without spawning Pi.
+        let mut data = json!({ "messages": [] });
+        if let Ok(root) = env::var("HELLDYE_PI_SESSION_DIR") {
+            if let Some(messages) = read_host_messages(Path::new(&root), &id) {
+                data["messages"] = Value::Array(messages);
+            }
+        }
+        let limit = page.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
+        let (total, has_more) = paginate_messages(&mut data, limit, page.before);
+        let source = if data["messages"].as_array().is_some_and(|m| !m.is_empty()) {
+            "host"
+        } else {
+            "none"
+        };
         return Ok(Json(json!({
             "started": false,
-            "messages": [],
-            "total": 0,
-            "hasMore": false,
+            "source": source,
+            "messages": data["messages"],
+            "total": total,
+            "hasMore": has_more,
             "eventId": session.seq.load(Ordering::SeqCst).to_string(),
             "epoch": epoch,
         })));
@@ -1736,19 +1937,21 @@ fn acquire_writer_lock(dir: &Path) -> Result<std::os::unix::net::UnixListener, S
     std::fs::create_dir_all(dir)
         .map_err(|error| format!("cannot create the state directory: {error}"))?;
     let path = dir.join("gateway.lock");
-    match UnixListener::bind(&path) {
-        Ok(listener) => Ok(listener),
-        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
-            if UnixStream::connect(&path).is_ok() {
-                Err("another gateway owns this state directory".to_string())
-            } else {
+    for _ in 0..3 {
+        match UnixListener::bind(&path) {
+            Ok(listener) => return Ok(listener),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                if UnixStream::connect(&path).is_ok() {
+                    return Err("another gateway owns this state directory".to_string());
+                }
+                // A closed listener can leave a stale socket path behind for a moment.
                 let _ = std::fs::remove_file(&path);
-                UnixListener::bind(&path)
-                    .map_err(|error| format!("cannot acquire the gateway lock: {error}"))
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
+            Err(error) => return Err(format!("cannot acquire the gateway lock: {error}")),
         }
-        Err(error) => Err(format!("cannot acquire the gateway lock: {error}")),
     }
+    UnixListener::bind(&path).map_err(|error| format!("cannot acquire the gateway lock: {error}"))
 }
 
 fn now_epoch() -> u64 {
@@ -2292,10 +2495,10 @@ mod tests {
     use super::{
         CachedModel, ContextFile, ImageBody, PromptContext, constant_time_eq, decode_base64,
         ensure_token_file_outside_workspaces, git_diff_output, info_payload, jpeg_dimensions,
-        migrated_name, neutral_name, paginate_messages, parse_numstat, parse_session_metadata,
-        parse_worktrees, pi_command, png_dimensions, read_token_file, redact_stderr_line,
-        resolve_workspace, resync_event, scan_import_dir, should_reap, valid_branch,
-        validate_images, write_state_atomically,
+        migrated_name, neutral_name, paginate_messages, parse_host_messages, parse_numstat,
+        parse_session_metadata, parse_worktrees, pi_command, png_dimensions, read_token_file,
+        redact_stderr_line, resolve_workspace, resync_event, scan_import_dir, should_reap,
+        valid_branch, validate_images, write_state_atomically,
     };
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
@@ -3052,6 +3255,87 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[tokio::test]
+    async fn unknown_session_is_not_found_and_spawns_nothing() {
+        let _guard = FAKE_PI_LOCK.lock().await;
+        let dir = temp_dir("unknown-session");
+        let marker = dir.join("spawned");
+        let script = dir.join("pi");
+        fs::write(&script, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+        let state = super::AppState {
+            pi_bin: script.to_string_lossy().into_owned(),
+            tools: "read".into(),
+            token: "secret".into(),
+            workspaces: std::sync::Arc::new(Vec::new()),
+            debug_stderr: false,
+            sessions: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            state_file: dir.join("sessions.json"),
+            epoch: "epoch".into(),
+            idle_secs: 0,
+            state_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        };
+        assert!(
+            super::session_state(State(state.clone()), AxumPath("missing".into()))
+                .await
+                .is_err()
+        );
+        assert!(
+            super::session_messages(
+                State(state.clone()),
+                AxumPath("missing".into()),
+                axum::extract::Query(super::PaginationQuery {
+                    limit: None,
+                    before: None,
+                }),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            super::delete_session(State(state), AxumPath("missing".into()))
+                .await
+                .is_err()
+        );
+        assert!(!marker.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn host_transcript_follows_the_active_leaf_only() {
+        let bytes = concat!(
+            r#"{"type":"session","id":"aaaaaaaa-bbbb","cwd":"/tmp"}"#,
+            "\n",
+            r#"{"type":"message","id":"a","parentId":null,"message":{"role":"user","content":[{"type":"text","text":"first"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"b","parentId":"a","message":{"role":"assistant","content":[{"type":"text","text":"old branch"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"c","parentId":"a","message":{"role":"user","content":[{"type":"text","text":"branch"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"d","parentId":"c","message":{"role":"assistant","content":[{"type":"text","text":"active"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"e","parentId":"d","#,
+        )
+        .as_bytes();
+        let messages = parse_host_messages(bytes);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["content"][0]["text"], "first");
+        assert_eq!(messages[1]["content"][0]["text"], "branch");
+        assert_eq!(messages[2]["content"][0]["text"], "active");
+    }
+
+    #[test]
+    fn host_transcript_ignores_malformed_lines() {
+        let bytes = concat!(
+            "not json\n",
+            r#"{"type":"message","id":"a","parentId":null,"message":{"role":"user","content":[]}}"#,
+            "\n{",
+        )
+        .as_bytes();
+        assert_eq!(parse_host_messages(bytes).len(), 1);
+    }
+
     #[cfg(unix)]
     #[test]
     fn writer_lock_allows_only_one_gateway() {
@@ -3059,7 +3343,15 @@ mod tests {
         let first = acquire_writer_lock(&dir).expect("first lock");
         assert!(acquire_writer_lock(&dir).is_err());
         drop(first);
-        assert!(acquire_writer_lock(&dir).is_ok());
+        let mut reacquired = false;
+        for _ in 0..10 {
+            if acquire_writer_lock(&dir).is_ok() {
+                reacquired = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(reacquired);
         let _ = fs::remove_dir_all(&dir);
     }
 }

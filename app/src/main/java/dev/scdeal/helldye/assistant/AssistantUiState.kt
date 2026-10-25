@@ -2,7 +2,9 @@ package dev.scdeal.helldye.assistant
 
 import dev.scdeal.helldye.gateway.GatewayCommand
 import dev.scdeal.helldye.gateway.GatewayDiff
+import dev.scdeal.helldye.gateway.GatewayDiffFile
 import dev.scdeal.helldye.gateway.GatewayModel
+import dev.scdeal.helldye.gateway.GatewayTree
 import dev.scdeal.helldye.gateway.GatewaySession
 import dev.scdeal.helldye.gateway.GatewayStats
 
@@ -53,6 +55,8 @@ data class AssistantUiState(
     val streaming: Boolean = false,
     /** Abort accepted by the gateway, not yet settled. */
     val stopping: Boolean = false,
+    /** Device has no default network. Drafts are preserved; nothing is auto-sent. */
+    val offline: Boolean = false,
     val notice: String? = null,
     val error: String? = null,
     val sessionId: String? = null,
@@ -78,6 +82,14 @@ data class AssistantUiState(
     val diffLoading: Boolean = false,
     val diff: GatewayDiff? = null,
     val diffError: String? = null,
+    /** Dirty workspace files after a turn; drives the summary above the composer. */
+    val changedFiles: List<GatewayDiffFile> = emptyList(),
+    val treeOpen: Boolean = false,
+    val treeLoading: Boolean = false,
+    val tree: GatewayTree? = null,
+    val treeError: String? = null,
+    /** Set after a successful export fetch; the screen launches SAF and then calls consumeExport. */
+    val exportHtml: String? = null,
     val sessions: List<GatewaySession> = emptyList(),
     val sessionsOpen: Boolean = false,
     val sessionsLoading: Boolean = false,

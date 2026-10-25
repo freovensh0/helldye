@@ -123,6 +123,7 @@ fun AssistantScreen(
     screenState: ScreenCaptureState,
     state: AssistantUiState,
     onSubmit: (String) -> Unit,
+    onDraftChange: (String) -> Unit,
     onAddAttachment: (Attachment) -> Unit,
     onRemoveAttachment: (Int) -> Unit,
     onRemoveScreenshot: () -> Unit,
@@ -151,6 +152,11 @@ fun AssistantScreen(
     onImportSessions: () -> Unit,
     onOpenDiff: () -> Unit,
     onCloseDiff: () -> Unit,
+    onOpenTree: () -> Unit,
+    onCloseTree: () -> Unit,
+    onExport: () -> Unit,
+    onExportConsumed: () -> Unit,
+    onReadAnswer: () -> Unit,
     onExpand: (() -> Unit)?,
     onClose: () -> Unit,
 ) {
@@ -162,6 +168,20 @@ fun AssistantScreen(
     val keyboard = LocalSoftwareKeyboardController.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/html"),
+    ) { uri ->
+        val html = state.exportHtml
+        if (uri != null && html != null) {
+            runCatching {
+                context.contentResolver.openOutputStream(uri)?.use { it.write(html.toByteArray()) }
+            }.onFailure { onNotice("Could not save the export.") }
+        }
+        onExportConsumed()
+    }
+    LaunchedEffect(state.exportHtml) {
+        if (state.exportHtml != null) exportLauncher.launch("helldye-session.html")
+    }
 
     fun runCommand(text: String): Boolean {
         when (text.trim()) {
@@ -295,6 +315,7 @@ fun AssistantScreen(
         Conversation.items(state.messages + state.screenMessages)
     }
     val railState = when {
+        state.offline && !state.streaming -> "OFFLINE"
         state.screenQuery -> "TEMP"
         state.stopping -> "STOPPING"
         state.streaming -> "THINKING"
@@ -441,7 +462,10 @@ fun AssistantScreen(
                     showSlash = showSlash,
                     slashEntries = slashEntries,
                     input = input,
-                    onInputChange = { input = it },
+                    onInputChange = {
+                        input = it
+                        onDraftChange(it)
+                    },
                     onSend = ::send,
                     onStop = onAbort,
                     onVoice = ::startVoice,
@@ -479,6 +503,7 @@ fun AssistantScreen(
                     onRemoveScreenshot = onRemoveScreenshot,
                     onDismissNotice = onDismissNotice,
                     onOpenModelPicker = onOpenModelPicker,
+                    onOpenDiff = onOpenDiff,
                     onSlashSelect = { entry ->
                         if (runCommand(entry.command)) {
                             keyboard?.hide()
@@ -495,6 +520,9 @@ fun AssistantScreen(
                 onOpenSessions = onOpenSessions,
                 onOpenSettings = onOpenSettings,
                 onOpenDiff = onOpenDiff,
+                onOpenTree = onOpenTree,
+                onExport = onExport,
+                onReadAnswer = onReadAnswer,
                 onExpand = onExpand,
                 onDismiss = { overflowOpen = false },
             )
@@ -506,6 +534,15 @@ fun AssistantScreen(
                 loading = state.diffLoading,
                 error = state.diffError,
                 onClose = onCloseDiff,
+            )
+        }
+
+        if (state.treeOpen) {
+            TreeSheet(
+                tree = state.tree,
+                loading = state.treeLoading,
+                error = state.treeError,
+                onClose = onCloseTree,
             )
         }
 
@@ -638,6 +675,9 @@ private fun OverflowMenu(
     onOpenSessions: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenDiff: () -> Unit,
+    onOpenTree: () -> Unit,
+    onExport: () -> Unit,
+    onReadAnswer: () -> Unit,
     onExpand: (() -> Unit)?,
     onDismiss: () -> Unit,
 ) {
@@ -668,6 +708,21 @@ private fun OverflowMenu(
             OverflowRow("DIFF") {
                 onDismiss()
                 onOpenDiff()
+            }
+            Hairline(color = HelldyeColors.LineSoft)
+            OverflowRow("SESSION TREE") {
+                onDismiss()
+                onOpenTree()
+            }
+            Hairline(color = HelldyeColors.LineSoft)
+            OverflowRow("EXPORT HTML") {
+                onDismiss()
+                onExport()
+            }
+            Hairline(color = HelldyeColors.LineSoft)
+            OverflowRow("READ ANSWER") {
+                onDismiss()
+                onReadAnswer()
             }
             if (onExpand != null) {
                 Hairline(color = HelldyeColors.LineSoft)
@@ -1004,6 +1059,7 @@ private fun BottomPanel(
     onRemoveScreenshot: () -> Unit,
     onDismissNotice: () -> Unit,
     onOpenModelPicker: () -> Unit,
+    onOpenDiff: () -> Unit,
     onSlashSelect: (SlashCommand) -> Unit,
 ) {
     val statuses = buildList {
@@ -1096,6 +1152,24 @@ private fun BottomPanel(
             )
         }
 
+        if (state.changedFiles.isNotEmpty()) {
+            val additions = state.changedFiles.sumOf { it.additions }
+            val deletions = state.changedFiles.sumOf { it.deletions }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = HelldyeDimens.TouchTarget)
+                    .clickable(role = Role.Button, onClick = onOpenDiff)
+                    .padding(horizontal = HelldyeDimens.Xs),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "${state.changedFiles.size} FILES · +$additions −$deletions",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = HelldyeColors.TextMuted,
+                )
+            }
+        }
         StatusLine(text = statusText, onClick = onOpenModelPicker)
 
         Composer(
@@ -1362,6 +1436,115 @@ private fun SlashPalette(
                 )
             }
             Hairline(color = HelldyeColors.LineSoft)
+        }
+    }
+}
+
+@Composable
+private fun TreeSheet(
+    tree: dev.scdeal.helldye.gateway.GatewayTree?,
+    loading: Boolean,
+    error: String?,
+    onClose: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.72f)),
+        contentAlignment = Alignment.BottomCenter,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.9f)
+                .background(
+                    color = HelldyeColors.Black,
+                    shape = RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp),
+                )
+                .border(1.dp, HelldyeColors.Line, RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp))
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .padding(horizontal = HelldyeDimens.ScreenPadding),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(HelldyeDimens.TopBar),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SectionLabel("SESSION TREE")
+                Spacer(Modifier.weight(1f))
+                TextButton(
+                    onClick = onClose,
+                    modifier = Modifier.heightIn(min = HelldyeDimens.TouchTarget),
+                ) {
+                    Text(
+                        text = "CLOSE",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = HelldyeColors.TextSecondary,
+                    )
+                }
+            }
+            Hairline(color = HelldyeColors.LineSoft)
+            val current = tree
+            when {
+                loading && current == null -> Text(
+                    text = "LOADING",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = HelldyeColors.TextMuted,
+                    modifier = Modifier.padding(vertical = HelldyeDimens.Lg),
+                )
+                current == null -> Text(
+                    text = error ?: "No entries.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (error != null) HelldyeColors.Signal else HelldyeColors.TextMuted,
+                    modifier = Modifier.padding(vertical = HelldyeDimens.Lg),
+                )
+                else -> Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    current.nodes.forEach { node ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(
+                                    start = (node.depth.coerceAtMost(12) * 12).dp,
+                                    top = HelldyeDimens.Xs,
+                                    bottom = HelldyeDimens.Xs,
+                                ),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            if (node.leaf) {
+                                Box(
+                                    Modifier
+                                        .width(2.dp)
+                                        .height(18.dp)
+                                        .background(HelldyeColors.White),
+                                )
+                                Spacer(Modifier.width(HelldyeDimens.Sm))
+                            }
+                            Text(
+                                text = buildString {
+                                    append(node.type.uppercase(Locale.ROOT))
+                                    node.role?.let { append(" · ").append(it.uppercase(Locale.ROOT)) }
+                                    node.label?.let { append(" · ").append(it) }
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (node.leaf) HelldyeColors.Text else HelldyeColors.TextMuted,
+                                maxLines = 1,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Text(
+                                text = node.id.take(8),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = HelldyeColors.TextMuted,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(HelldyeDimens.Lg))
+                }
+            }
         }
     }
 }
@@ -2437,6 +2620,7 @@ private fun AssistantScreenPreview() {
                 ),
             ),
             onSubmit = {},
+            onDraftChange = {},
             onAddAttachment = {},
             onRemoveAttachment = {},
             onRemoveScreenshot = {},
@@ -2465,6 +2649,11 @@ private fun AssistantScreenPreview() {
             onImportSessions = {},
             onOpenDiff = {},
             onCloseDiff = {},
+            onOpenTree = {},
+            onCloseTree = {},
+            onExport = {},
+            onExportConsumed = {},
+            onReadAnswer = {},
             onExpand = {},
             onClose = {},
         )

@@ -29,6 +29,12 @@ class SettingsStore(context: Context) {
         runCatching { createSecurePreferences() }.getOrNull()
     }
 
+    fun readAnswersEnabled(): Boolean = preferences.getBoolean(KEY_READ_ANSWERS, false)
+
+    fun setReadAnswers(enabled: Boolean) {
+        preferences.edit().putBoolean(KEY_READ_ANSWERS, enabled).apply()
+    }
+
     fun isConfigured(): Boolean =
         preferences.getString(KEY_URL, "").orEmpty().isNotBlank()
 
@@ -65,6 +71,24 @@ class SettingsStore(context: Context) {
             ?.remove(KEY_SESSION_FINGERPRINT)
             ?.remove(KEY_SESSION_EPOCH)
             ?.apply()
+    }
+
+    /** One draft per session in encrypted preferences. Screenshot bytes are never stored. */
+    fun saveDraft(sessionId: String, text: String) {
+        val secure = securePreferences ?: return
+        val key = "draft_$sessionId"
+        if (text.isBlank()) {
+            secure.edit().remove(key).apply()
+        } else {
+            secure.edit().putString(key, text).apply()
+        }
+    }
+
+    fun loadDraft(sessionId: String): String? =
+        securePreferences?.getString("draft_$sessionId", null)?.takeIf { it.isNotBlank() }
+
+    fun clearDraft(sessionId: String) {
+        securePreferences?.edit()?.remove("draft_$sessionId")?.apply()
     }
 
     /** A submit that was in flight when the process died; restored as a retry draft, never re-sent. */
@@ -113,5 +137,6 @@ class SettingsStore(context: Context) {
         const val KEY_SESSION_FINGERPRINT = "session_fingerprint"
         const val KEY_SESSION_EPOCH = "session_epoch"
         const val KEY_PENDING_SUBMIT = "pending_submit"
+        const val KEY_READ_ANSWERS = "read_answers"
     }
 }

@@ -62,6 +62,8 @@ never a command-line argument, and never enters the Pi child environment.
 | `GET` | `/v1/sessions/{id}/worktrees` | — | `200` `{worktrees}` |
 | `POST` | `/v1/sessions/{id}/worktrees` | `{branch, path}` | `200` `{path, branch}` |
 | `POST` | `/v1/sessions/{id}/allow_edits` | `{enabled}` | `200` `{allowEdits}` |
+| `GET` | `/v1/sessions/{id}/tree` | — | `200` `{nodes, leafId}` (no message bodies) |
+| `GET` | `/v1/sessions/{id}/export` | — | `200` `text/html`, capped at 20 MB |
 
 ### 2.1 Session shape
 
@@ -99,7 +101,7 @@ never a command-line argument, and never enters the Pi child environment.
   "capabilities": {
     "sessions": true, "images": true, "structuredContext": true, "workspaceAllowlist": true,
     "ephemeralSessions": true, "import": true, "fork": false, "clone": false,
-    "tree": false, "export": false
+    "tree": true, "export": true
   }
 }
 ```
@@ -124,8 +126,10 @@ stored cursor when the epoch differs (see §3.1).
 
 Read paths never start Pi:
 
-- `/messages` on a stopped session returns `{started:false, messages:[], eventId, epoch}`; the Phase 5
-  host-transcript reader will serve its messages without a child.
+- `/messages` on a stopped session reads its Pi JSONL transcript from `HELLDYE_PI_SESSION_DIR` (active
+  parent chain only, malformed/partial lines ignored) and returns `{started:false, source:"host",
+  messages, total, hasMore, eventId, epoch}` without spawning Pi. If no file is found the list is empty
+  and `source` is `none`.
 - `/state` on a stopped session returns `{started:false, busy:false, status:"stopped",
   lastEventId, epoch}`.
 - `/events` on a stopped session emits one `not_started` SSE event and closes.
@@ -206,6 +210,12 @@ All routes are read-only except worktree creation and the per-session tool gate.
   `HELLDYE_ACTION_TOOLS`; the override is persisted and applies the next time Pi starts for that
   session. Disabling returns it to `HELLDYE_TOOLS`. Ephemeral sessions are always read-only. Each
   toggle is audited on stderr without prompt content.
+- `GET /tree` maps to Pi's `get_tree` and flattens it to `{id, type, role, depth, label, leaf}`; message
+  bodies are never returned. `GET /export` calls Pi's `export_html` into a unique temp file, streams
+  the HTML as `text/html`, and deletes the file. Both are capability-gated (`tree`, `export`).
+- Fork and clone remain disabled (`fork: false`, `clone: false`): Pi's RPC changes the live session's
+  identity (`get_state.sessionId/sessionFile`), which needs an explicit gateway-record design before
+  the phone can rely on it. They are not faked.
 
 ### 2.6 Rename
 
