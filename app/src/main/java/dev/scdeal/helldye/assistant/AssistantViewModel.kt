@@ -642,6 +642,34 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun importSessions() {
+        val config = settings.load()
+        if (config.url.isBlank()) {
+            notice("Configure the Pi gateway in Settings first.")
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { ensureClient(config).importSessions() }
+                .onSuccess { imported ->
+                    runCatching { ensureClient(config).sessions() }.onSuccess { sessions ->
+                        _state.update { it.copy(sessions = sessions) }
+                    }
+                    notice(
+                        if (imported.isEmpty()) {
+                            "No new sessions found on the host."
+                        } else {
+                            "Imported ${imported.size} session(s) from the host."
+                        },
+                    )
+                }
+                .onFailure { error ->
+                    _state.update {
+                        it.copy(error = error.message ?: "Could not import sessions.")
+                    }
+                }
+        }
+    }
+
     fun deleteSession(sessionId: String) {
         val gateway = client ?: return
         viewModelScope.launch(Dispatchers.IO) {

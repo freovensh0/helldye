@@ -146,6 +146,7 @@ fun AssistantScreen(
     onDeleteSession: (String) -> Unit,
     onRenameSession: (String, String) -> Unit,
     onLoadOlder: () -> Unit,
+    onImportSessions: () -> Unit,
     onExpand: (() -> Unit)?,
     onClose: () -> Unit,
 ) {
@@ -503,6 +504,7 @@ fun AssistantScreen(
                 onDelete = onDeleteSession,
                 onRename = onRenameSession,
                 onNew = onNewSession,
+                onImport = onImportSessions,
                 onClose = onCloseSessions,
             )
         }
@@ -1345,6 +1347,7 @@ private fun SessionSheet(
     onDelete: (String) -> Unit,
     onRename: (String, String) -> Unit,
     onNew: () -> Unit,
+    onImport: () -> Unit,
     onClose: () -> Unit,
 ) {
     var query by rememberSaveable { mutableStateOf("") }
@@ -1423,6 +1426,21 @@ private fun SessionSheet(
                 )
             }
             Hairline(color = HelldyeColors.LineSoft)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 56.dp)
+                    .clickable(role = Role.Button, onClick = onImport)
+                    .padding(horizontal = HelldyeDimens.Xs),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "IMPORT FROM HOST",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = HelldyeColors.TextSecondary,
+                )
+            }
+            Hairline(color = HelldyeColors.LineSoft)
 
             when {
                 loading && sessions.isEmpty() -> Text(
@@ -1466,7 +1484,11 @@ private fun SessionSheet(
                                         overflow = TextOverflow.Ellipsis,
                                     )
                                     Text(
-                                        text = "${session.status.uppercase(Locale.ROOT)} · ${session.id.take(8)}",
+                                        text = if (session.onHost) {
+                                            "ON HOST · ${session.id.take(8)}"
+                                        } else {
+                                            "${session.status.uppercase(Locale.ROOT)} · ${session.id.take(8)}"
+                                        },
                                         style = MaterialTheme.typography.labelSmall,
                                         color = HelldyeColors.TextMuted,
                                         maxLines = 1,
@@ -2281,6 +2303,7 @@ private fun AssistantScreenPreview() {
             onDeleteSession = {},
             onRenameSession = { _, _ -> },
             onLoadOlder = {},
+            onImportSessions = {},
             onExpand = {},
             onClose = {},
         )
