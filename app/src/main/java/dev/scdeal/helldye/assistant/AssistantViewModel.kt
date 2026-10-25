@@ -260,6 +260,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     /** Close/hide/background: drop the transient screen answer and delete its ephemeral session. */
     fun clearScreenQuery() {
+        ScreenshotStager.clear()
         val id = screenSessionId
         val wasStreaming = screenJob?.isActive == true
         screenSessionId = null
