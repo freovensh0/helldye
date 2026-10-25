@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     convert::Infallible,
     env,
     path::{Component, Path, PathBuf},
@@ -104,12 +104,23 @@ struct AppState {
     state_lock: Arc<Mutex<()>>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct CachedModel {
+    provider: String,
+    id: String,
+    #[serde(default)]
+    name: String,
+}
+
 struct Session {
     id: String,
     name: RwLock<String>,
     name_is_explicit: AtomicBool,
     cwd: String,
     ephemeral: bool,
+    on_host: AtomicBool,
+    last_model: Mutex<Option<CachedModel>>,
+    last_thinking: Mutex<Option<String>>,
     stdin: Mutex<Option<ChildStdin>>,
     start: Mutex<()>,
     seq: AtomicU64,
@@ -141,6 +152,9 @@ struct SessionInfo {
     started: bool,
     /// True from prompt acceptance until `agent_settled`.
     busy: bool,
+    /// Imported from the host's Pi session directory; not created by the phone.
+    #[serde(rename = "onHost")]
+    on_host: bool,
     created: u64,
 }
 
@@ -155,6 +169,14 @@ struct StoredSession {
     /// flips this, so a state file from an older gateway is migrated to a neutral name on load.
     #[serde(default)]
     renamed: bool,
+    /// Last-known composer values, so a stopped session renders without spawning Pi.
+    #[serde(default)]
+    model: Option<CachedModel>,
+    #[serde(default)]
+    thinking: Option<String>,
+    /// True when the record came from `HELLDYE_PI_SESSION_DIR`, not from this phone.
+    #[serde(default)]
+    on_host: bool,
 }
 
 #[derive(Deserialize)]
@@ -320,6 +342,7 @@ impl Session {
             status: status.to_string(),
             started,
             busy,
+            on_host: self.on_host.load(Ordering::SeqCst),
             created: self.created,
         }
     }
@@ -341,7 +364,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!(
                     "Usage: helldye-gateway [--listen ADDR] [--pi PATH] [--tools LIST]\n\
                      Env: HELLDYE_PI_BIN, HELLDYE_TOOLS, HELLDYE_TOKEN, HELLDYE_TOKEN_FILE,\n\
-                          HELLDYE_WORKSPACES, HELLDYE_DEBUG, HELLDYE_STATE_FILE, HELLDYE_IDLE_SECS\n\
+                          HELLDYE_WORKSPACES, HELLDYE_DEBUG, HELLDYE_STATE_FILE, HELLDYE_IDLE_SECS,\n\
+                          HELLDYE_PI_SESSION_DIR\n\
                      A bearer token is required for every start, including loopback."
                 );
                 return Ok(());
@@ -375,6 +399,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
         .unwrap_or(1_800);
+    // One writer per state directory. The socket is released when this process exits; a stale file
+    // from a dead process is removed after a failed connect.
+    #[cfg(unix)]
+    let _writer_lock = {
+        let dir = state_file.parent().unwrap_or_else(|| Path::new("."));
+        acquire_writer_lock(dir).map_err(|error| -> Box<dyn std::error::Error> {
+            format!("refusing to start: {error}").into()
+        })?
+    };
     let (restored, migrated) = load_sessions(&state_file, &workspaces).await;
 
     let state = AppState {
@@ -398,6 +431,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/health", get(health))
         .route("/v1/info", get(info))
         .route("/v1/sessions", get(list_sessions).post(create_session))
+        .route("/v1/sessions/import", post(import_sessions))
         .route("/v1/sessions/{id}", get(get_session).delete(delete_session))
         .route("/v1/sessions/{id}/events", get(session_events))
         .route("/v1/sessions/{id}/messages", get(session_messages))
@@ -599,6 +633,8 @@ async fn info(State(state): State<AppState>) -> impl IntoResponse {
 fn info_payload() -> Value {
     json!({
         "version": env!("CARGO_PKG_VERSION"),
+        "protocolVersion": 1,
+        "minimumProtocolVersion": 1,
         "piVersion": Value::Null,
         "capabilities": {
             "sessions": true,
@@ -606,7 +642,7 @@ fn info_payload() -> Value {
             "structuredContext": true,
             "workspaceAllowlist": true,
             "ephemeralSessions": true,
-            "import": false,
+            "import": true,
             "fork": false,
             "export": false,
         },
@@ -641,6 +677,159 @@ async fn create_session(
         persist_sessions(&state).await;
     }
     Ok(Json(info))
+}
+
+/// Explicit host import: read-only scan of `HELLDYE_PI_SESSION_DIR`. Nothing is spawned and a
+/// removed record does not reappear until the operator imports again.
+async fn import_sessions(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let dir = env::var("HELLDYE_PI_SESSION_DIR").map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "HELLDYE_PI_SESSION_DIR is not configured".to_string(),
+        )
+    })?;
+    let root = Path::new(&dir);
+    if !root.is_dir() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "HELLDYE_PI_SESSION_DIR is not a directory".to_string(),
+        ));
+    }
+    let existing: HashSet<String> = state.sessions.read().await.keys().cloned().collect();
+    let candidates = scan_import_dir(root, &state.workspaces, &existing);
+    let mut imported = Vec::new();
+    {
+        let mut sessions = state.sessions.write().await;
+        for candidate in &candidates {
+            if sessions.contains_key(&candidate.id) {
+                continue;
+            }
+            let session = new_session(
+                candidate.id.clone(),
+                neutral_name(&candidate.id),
+                candidate.cwd.clone(),
+                candidate.updated,
+                false,
+                false,
+            );
+            session.on_host.store(true, Ordering::SeqCst);
+            imported.push(session.info().await);
+            sessions.insert(candidate.id.clone(), session);
+        }
+    }
+    if !imported.is_empty() {
+        persist_sessions(&state).await;
+    }
+    Ok(Json(json!({ "imported": imported })))
+}
+
+struct ImportCandidate {
+    id: String,
+    cwd: PathBuf,
+    updated: u64,
+}
+
+/// A session file is a JSONL log. Only a top-level `cwd` and a timestamp are read; the transcript is
+/// never parsed or returned. A trailing partial line is ignored.
+fn parse_session_metadata(bytes: &[u8]) -> (Option<String>, Option<u64>) {
+    let mut cwd = None;
+    let mut updated = None;
+    for line in bytes.split(|byte| *byte == b'\n') {
+        let Ok(value) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        if cwd.is_none() {
+            if let Some(found) = value.get("cwd").and_then(Value::as_str) {
+                if !found.is_empty() {
+                    cwd = Some(found.to_string());
+                }
+            }
+        }
+        for key in ["timestamp", "updated", "mtime"] {
+            if let Some(stamp) = value.get(key).and_then(Value::as_u64) {
+                updated = updated.max(Some(if stamp > 10_000_000_000 {
+                    stamp / 1_000
+                } else {
+                    stamp
+                }));
+            }
+        }
+    }
+    (cwd, updated)
+}
+
+fn scan_import_dir(
+    root: &Path,
+    roots: &[PathBuf],
+    existing: &HashSet<String>,
+) -> Vec<ImportCandidate> {
+    let mut result = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    let mut visited = 0usize;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            if visited > 500 {
+                return result;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                if dir.components().count() < root.components().count() + 3 {
+                    stack.push(entry.path());
+                }
+                continue;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if id.len() < 8
+                || id.len() > 128
+                || !id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                || existing.contains(id)
+            {
+                continue;
+            }
+            if metadata.len() > 2_000_000 {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let (cwd, updated) = parse_session_metadata(&bytes);
+            let Some(cwd) = cwd else {
+                continue;
+            };
+            let Ok(cwd) = resolve_workspace(roots, Some(&cwd)) else {
+                continue;
+            };
+            let fallback = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0);
+            result.push(ImportCandidate {
+                id: id.to_string(),
+                cwd,
+                updated: updated.unwrap_or(fallback),
+            });
+        }
+    }
+    result.sort_by(|left, right| right.updated.cmp(&left.updated));
+    result
 }
 
 /// Bounds an ephemeral record whose stream disconnected before the turn settled. Activity resets the
@@ -896,6 +1085,21 @@ async fn session_state(
             }
         }
     }
+    // The cache keeps the composer truthful while Pi is stopped; a live get_state wins above.
+    if payload.get("model").and_then(Value::as_object).is_none() {
+        if let Some(model) = session.last_model.lock().await.clone() {
+            payload["model"] = json!(model);
+        }
+    }
+    if payload
+        .get("thinkingLevel")
+        .and_then(Value::as_str)
+        .is_none()
+    {
+        if let Some(thinking) = session.last_thinking.lock().await.clone() {
+            payload["thinkingLevel"] = json!(thinking);
+        }
+    }
     Ok(Json(payload))
 }
 
@@ -905,6 +1109,11 @@ async fn set_session_model(
     Json(body): Json<SetModel>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let session = lookup_started(&state, &id).await?;
+    let cached = CachedModel {
+        provider: body.provider.clone(),
+        id: body.model_id.clone(),
+        name: String::new(),
+    };
     let response = session
         .request(
             json!({
@@ -916,7 +1125,16 @@ async fn set_session_model(
         )
         .await
         .map_err(bad_gateway)?;
-    command_data(response).map(Json)
+    let data = command_data(response)?;
+    let name = data
+        .get("model")
+        .and_then(|model| model.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    *session.last_model.lock().await = Some(CachedModel { name, ..cached });
+    persist_sessions(&state).await;
+    Ok(Json(data))
 }
 
 async fn session_stats(
@@ -955,6 +1173,7 @@ async fn set_session_thinking(
     Json(body): Json<SetThinking>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let session = lookup_started(&state, &id).await?;
+    let level = body.level.clone();
     let response = session
         .request(
             json!({ "type": "set_thinking_level", "level": body.level }),
@@ -962,7 +1181,10 @@ async fn set_session_thinking(
         )
         .await
         .map_err(bad_gateway)?;
-    command_data(response).map(Json)
+    let data = command_data(response)?;
+    *session.last_thinking.lock().await = Some(level);
+    persist_sessions(&state).await;
+    Ok(Json(data))
 }
 
 async fn extension_ui_response(
@@ -1197,6 +1419,27 @@ async fn lookup(state: &AppState, id: &str) -> Result<Arc<Session>, StatusCode> 
         .ok_or(StatusCode::NOT_FOUND)
 }
 
+#[cfg(unix)]
+fn acquire_writer_lock(dir: &Path) -> Result<std::os::unix::net::UnixListener, String> {
+    use std::os::unix::net::{UnixListener, UnixStream};
+    std::fs::create_dir_all(dir)
+        .map_err(|error| format!("cannot create the state directory: {error}"))?;
+    let path = dir.join("gateway.lock");
+    match UnixListener::bind(&path) {
+        Ok(listener) => Ok(listener),
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            if UnixStream::connect(&path).is_ok() {
+                Err("another gateway owns this state directory".to_string())
+            } else {
+                let _ = std::fs::remove_file(&path);
+                UnixListener::bind(&path)
+                    .map_err(|error| format!("cannot acquire the gateway lock: {error}"))
+            }
+        }
+        Err(error) => Err(format!("cannot acquire the gateway lock: {error}")),
+    }
+}
+
 fn now_epoch() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1219,6 +1462,9 @@ fn new_session(
         name_is_explicit: AtomicBool::new(name_is_explicit),
         cwd: cwd.to_string_lossy().into_owned(),
         ephemeral,
+        on_host: AtomicBool::new(false),
+        last_model: Mutex::new(None),
+        last_thinking: Mutex::new(None),
         stdin: Mutex::new(None),
         start: Mutex::new(()),
         seq: AtomicU64::new(0),
@@ -1352,6 +1598,9 @@ async fn load_sessions(
                     migrated = true;
                 }
                 let session = new_session(item.id, name, cwd, item.created, item.renamed, false);
+                session.on_host.store(item.on_host, Ordering::SeqCst);
+                *session.last_model.lock().await = item.model;
+                *session.last_thinking.lock().await = item.thinking;
                 restored.insert(session.id.clone(), session);
             }
         }
@@ -1373,6 +1622,9 @@ async fn persist_sessions(state: &AppState) {
             cwd: session.cwd.clone(),
             created: session.created,
             renamed: session.name_is_explicit.load(Ordering::SeqCst),
+            model: session.last_model.lock().await.clone(),
+            thinking: session.last_thinking.lock().await.clone(),
+            on_host: session.on_host.load(Ordering::SeqCst),
         });
     }
     drop(sessions);
@@ -1709,12 +1961,14 @@ fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::acquire_writer_lock;
     use super::{
-        ContextFile, ImageBody, PromptContext, constant_time_eq, decode_base64,
+        CachedModel, ContextFile, ImageBody, PromptContext, constant_time_eq, decode_base64,
         ensure_token_file_outside_workspaces, info_payload, jpeg_dimensions, migrated_name,
-        neutral_name, paginate_messages, pi_command, png_dimensions, read_token_file,
-        redact_stderr_line, resolve_workspace, resync_event, should_reap, validate_images,
-        write_state_atomically,
+        neutral_name, paginate_messages, parse_session_metadata, pi_command, png_dimensions,
+        read_token_file, redact_stderr_line, resolve_workspace, resync_event, scan_import_dir,
+        should_reap, validate_images, write_state_atomically,
     };
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
@@ -1869,7 +2123,7 @@ mod tests {
         let (sessions, migrated) = super::load_sessions(&state_file, &roots).await;
         assert!(migrated);
         assert_eq!(sessions.len(), 1);
-        let session = sessions.values().next().unwrap();
+        let session = sessions.values().next().unwrap().clone();
         assert_eq!(session.name.read().await.as_str(), "Session 12345678");
 
         let state = super::AppState {
@@ -1884,11 +2138,19 @@ mod tests {
             idle_secs: 0,
             state_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         };
+        *session.last_model.lock().await = Some(CachedModel {
+            provider: "anthropic".into(),
+            id: "claude".into(),
+            name: "Claude".into(),
+        });
+        *session.last_thinking.lock().await = Some("high".into());
         super::persist_sessions(&state).await;
         let stored: Vec<super::StoredSession> =
             serde_json::from_slice(&fs::read(&state_file).unwrap()).unwrap();
         assert_eq!(stored[0].name, "Session 12345678");
         assert!(!stored[0].renamed);
+        assert_eq!(stored[0].model.as_ref().unwrap().id, "claude");
+        assert_eq!(stored[0].thinking.as_deref(), Some("high"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -2305,6 +2567,12 @@ mod tests {
             false,
             false,
         );
+        *session.last_model.lock().await = Some(CachedModel {
+            provider: "anthropic".into(),
+            id: "claude".into(),
+            name: "Claude".into(),
+        });
+        *session.last_thinking.lock().await = Some("high".into());
         let mut sessions = std::collections::HashMap::new();
         sessions.insert(session.id.clone(), session);
         let state = super::AppState {
@@ -2328,6 +2596,8 @@ mod tests {
         assert_eq!(value["busy"], false);
         assert_eq!(value["status"], "stopped");
         assert_eq!(value["epoch"], "epoch-a");
+        assert_eq!(value["model"]["id"], "claude");
+        assert_eq!(value["thinkingLevel"], "high");
         assert!(!marker.exists(), "reading state must not spawn Pi");
 
         let Json(messages) = super::session_messages(
@@ -2349,6 +2619,64 @@ mod tests {
             .unwrap();
         assert_eq!(deleted["removed"], true);
         assert_eq!(deleted["transcriptKept"], true);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_metadata_ignores_partial_and_foreign_lines() {
+        let bytes = b"{\"type\":\"session\",\"cwd\":\"/home/you/code\"}\nnot json\n{\"timestamp\":1700000000}\n{\"partial\":";
+        let (cwd, updated) = parse_session_metadata(bytes);
+        assert_eq!(cwd.as_deref(), Some("/home/you/code"));
+        assert_eq!(updated, Some(1_700_000_000));
+
+        let (cwd, updated) = parse_session_metadata(b"{\"timestamp\":1700000000000}");
+        assert_eq!(cwd, None);
+        assert_eq!(updated, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn host_import_keeps_only_valid_workspace_sessions() {
+        let dir = temp_dir("import-scan");
+        let workspace = dir.join("ws");
+        fs::create_dir_all(&workspace).unwrap();
+        let outside = dir.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        let roots = vec![workspace.canonicalize().unwrap()];
+
+        let valid = dir.join("aaaa1111-bbbb-cccc-dddd-eeeeffff0000.jsonl");
+        fs::write(
+            &valid,
+            format!(
+                "{{\"cwd\":\"{}\"}}\n{{\"timestamp\":1700000000}}\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+        let outside_file = dir.join("22223333-bbbb-cccc-dddd-eeeeffff0000.jsonl");
+        fs::write(
+            &outside_file,
+            format!("{{\"cwd\":\"{}\"}}\n", outside.display()),
+        )
+        .unwrap();
+        let no_cwd = dir.join("33334444-bbbb-cccc-dddd-eeeeffff0000.jsonl");
+        fs::write(&no_cwd, "{\"type\":\"message\"}\n").unwrap();
+
+        let candidates = scan_import_dir(&dir, &roots, &Default::default());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].id, "aaaa1111-bbbb-cccc-dddd-eeeeffff0000");
+        assert_eq!(candidates[0].cwd, workspace.canonicalize().unwrap());
+        assert_eq!(candidates[0].updated, 1_700_000_000);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writer_lock_allows_only_one_gateway() {
+        let dir = temp_dir("writer-lock");
+        let first = acquire_writer_lock(&dir).expect("first lock");
+        assert!(acquire_writer_lock(&dir).is_err());
+        drop(first);
+        assert!(acquire_writer_lock(&dir).is_ok());
         let _ = fs::remove_dir_all(&dir);
     }
 }

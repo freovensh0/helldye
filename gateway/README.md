@@ -21,7 +21,7 @@ HELLDYE_WORKSPACES=/home/you/projects \
 
 Environment: `HELLDYE_PI_BIN`, `HELLDYE_TOOLS`, `HELLDYE_TOKEN` or `HELLDYE_TOKEN_FILE`,
 `HELLDYE_WORKSPACES`, `HELLDYE_DEBUG`, `HELLDYE_STATE_FILE`, `HELLDYE_IDLE_SECS` (default 1800, `0`
-disables the idle reaper).
+disables the idle reaper), `HELLDYE_PI_SESSION_DIR` (explicit host import).
 
 A bearer token is **required for every start, including loopback**. The gateway exits instead of
 serving `/v1` without one. Use `HELLDYE_TOKEN` or point `HELLDYE_TOKEN_FILE` at a file that is mode
@@ -106,8 +106,9 @@ event. The image and answer are not persisted by the gateway.
 
 ## Session removal and retention
 
-Pi owns every transcript. The gateway keeps only a session record (`sessions.json`) and an in-memory
-event ring; it does not write prompts or images to its own storage.
+Pi owns every transcript. The gateway keeps only a session record (`sessions.json`: identity, name,
+cwd, timestamps, whether imported, and the last-known model/thinking) and an in-memory event ring; it
+does not write prompts or images to its own storage.
 
 - **Remove from list** (`DELETE /v1/sessions/{id}`): removes the gateway record, persists the list, and
   closes Pi's stdin so the process exits. This is the only removal the phone can do. It does not delete
@@ -168,10 +169,15 @@ image MIME type, base64, dimensions, and size before forwarding the bytes.
 - Event replay is an in-memory ring of 4,096 events per session. The session list is persisted to
   `~/.local/share/helldye/sessions.json` (`HELLDYE_STATE_FILE` overrides it), and Pi keeps each
   session's transcript in its own session file; restarting the gateway resumes it on the next request.
-- A session is started lazily with `pi --session-id <id>`. The app always loads `/messages` first
-  (whenever the session is opened, not only after a gateway restart), restores the transcript, and
-  then opens the event stream from the returned `eventId`, so old history never depends on the
-  in-memory replay ring.
+- A session is started lazily with `pi --session-id <id>`. Opening a stopped session does not spawn
+  Pi: `/messages` returns `started=false` and `/events` returns one `not_started` event. The app loads
+  `/messages` after a prompt, restores the transcript, and opens the event stream from the returned
+  `eventId`, so old history never depends on the in-memory replay ring.
+- The state directory holds a `gateway.lock` Unix socket; a second gateway that would own the same
+  `sessions.json` refuses to start. A stale socket from a dead process is replaced.
+- `POST /v1/sessions/import` explicitly scans `HELLDYE_PI_SESSION_DIR` for `*.jsonl` session files and
+  adds neutral `ON HOST` records. It never starts Pi and never returns transcript content. Existing
+  ids are skipped; remove-then-import is the only way to bring one back.
 - Prompts are accepted asynchronously; streamed output and command responses arrive on SSE.
 - Pi's stderr is drained but not logged by default. Set `HELLDYE_DEBUG=1` to log it; lines are
   bounded and any prompt-like, content, message, data, or image payload is dropped or redacted. The
