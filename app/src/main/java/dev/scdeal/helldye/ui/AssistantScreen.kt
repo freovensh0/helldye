@@ -1099,6 +1099,14 @@ private fun BottomPanel(
                 },
                 onRemove = onRemoveScreenshot,
             )
+            if (screenState == ScreenCaptureState.Blocked) {
+                Text(
+                    text = "Capture blocked. Open the app you want help with, then trigger the assistant again.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = HelldyeColors.TextMuted,
+                    modifier = Modifier.padding(top = HelldyeDimens.Xs),
+                )
+            }
             Spacer(Modifier.height(HelldyeDimens.Sm))
         }
 
@@ -1347,6 +1355,7 @@ private fun StatusLine(text: String, onClick: () -> Unit) {
                 onClickLabel = "Change model or thinking",
                 onClick = onClick,
             )
+            .horizontalScroll(rememberScrollState())
             .padding(horizontal = HelldyeDimens.Xs),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1355,7 +1364,6 @@ private fun StatusLine(text: String, onClick: () -> Unit) {
             style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.5.sp),
             color = HelldyeColors.TextMuted,
             maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
         )
     }
 }
