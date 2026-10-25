@@ -21,7 +21,8 @@ HELLDYE_WORKSPACES=/home/you/projects \
 
 Environment: `HELLDYE_PI_BIN`, `HELLDYE_TOOLS`, `HELLDYE_TOKEN` or `HELLDYE_TOKEN_FILE`,
 `HELLDYE_WORKSPACES`, `HELLDYE_DEBUG`, `HELLDYE_STATE_FILE`, `HELLDYE_IDLE_SECS` (default 1800, `0`
-disables the idle reaper), `HELLDYE_PI_SESSION_DIR` (explicit host import).
+disables the idle reaper), `HELLDYE_PI_SESSION_DIR` (explicit host import), `HELLDYE_ACTION_TOOLS`
+(the write tool set an explicit per-session "allow edits" enables).
 
 A bearer token is **required for every start, including loopback**. The gateway exits instead of
 serving `/v1` without one. Use `HELLDYE_TOKEN` or point `HELLDYE_TOKEN_FILE` at a file that is mode
@@ -178,6 +179,12 @@ image MIME type, base64, dimensions, and size before forwarding the bytes.
 - `POST /v1/sessions/import` explicitly scans `HELLDYE_PI_SESSION_DIR` for `*.jsonl` session files and
   adds neutral `ON HOST` records. It never starts Pi and never returns transcript content. Existing
   ids are skipped; remove-then-import is the only way to bring one back.
+- Coding surface: `/diff` returns the workspace diff (capped) plus a per-file summary; `/file` peeks
+  UTF-8 text inside the workspace; `/worktrees` lists and creates git worktrees with fixed argv and an
+  allowlisted destination. There is no phone-side delete, editor, commit, or push.
+- Action tools stay off per session. `POST /allow_edits` with `{enabled:true}` requires
+  `HELLDYE_ACTION_TOOLS`, refuses a running session, applies only to that session, and is persisted.
+  Enabling is audited on stderr without prompt content.
 - Prompts are accepted asynchronously; streamed output and command responses arrive on SSE.
 - Pi's stderr is drained but not logged by default. Set `HELLDYE_DEBUG=1` to log it; lines are
   bounded and any prompt-like, content, message, data, or image payload is dropped or redacted. The

@@ -121,6 +121,8 @@ struct Session {
     on_host: AtomicBool,
     last_model: Mutex<Option<CachedModel>>,
     last_thinking: Mutex<Option<String>>,
+    /// Per-session tool override. Only an explicit user action sets it; the default is read-only.
+    tools_override: Mutex<Option<String>>,
     stdin: Mutex<Option<ChildStdin>>,
     start: Mutex<()>,
     seq: AtomicU64,
@@ -177,6 +179,9 @@ struct StoredSession {
     /// True when the record came from `HELLDYE_PI_SESSION_DIR`, not from this phone.
     #[serde(default)]
     on_host: bool,
+    /// The operator allowed action tools for this session (G-06).
+    #[serde(default)]
+    allow_edits: bool,
 }
 
 #[derive(Deserialize)]
@@ -191,6 +196,22 @@ struct PaginationQuery {
     limit: Option<usize>,
     #[serde(default)]
     before: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct FileQuery {
+    path: String,
+}
+
+#[derive(Deserialize)]
+struct CreateWorktreeBody {
+    branch: String,
+    path: String,
+}
+
+#[derive(Deserialize)]
+struct AllowEditsBody {
+    enabled: bool,
 }
 
 fn default_replay() -> bool {
@@ -365,7 +386,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "Usage: helldye-gateway [--listen ADDR] [--pi PATH] [--tools LIST]\n\
                      Env: HELLDYE_PI_BIN, HELLDYE_TOOLS, HELLDYE_TOKEN, HELLDYE_TOKEN_FILE,\n\
                           HELLDYE_WORKSPACES, HELLDYE_DEBUG, HELLDYE_STATE_FILE, HELLDYE_IDLE_SECS,\n\
-                          HELLDYE_PI_SESSION_DIR\n\
+                          HELLDYE_PI_SESSION_DIR, HELLDYE_ACTION_TOOLS\n\
                      A bearer token is required for every start, including loopback."
                 );
                 return Ok(());
@@ -444,6 +465,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/sessions/{id}/state", get(session_state))
         .route("/v1/sessions/{id}/model", post(set_session_model))
         .route("/v1/sessions/{id}/stats", get(session_stats))
+        .route("/v1/sessions/{id}/diff", get(session_diff))
+        .route("/v1/sessions/{id}/file", get(session_file))
+        .route(
+            "/v1/sessions/{id}/worktrees",
+            get(session_worktrees).post(create_worktree),
+        )
+        .route("/v1/sessions/{id}/allow_edits", post(set_allow_edits))
         .route(
             "/v1/sessions/{id}/thinking",
             get(session_thinking).post(set_session_thinking),
@@ -1057,6 +1085,289 @@ async fn session_commands(
 }
 
 /// Reads gateway state without spawning Pi. `get_state` is queried only when Pi is already running.
+const MAX_DIFF_BYTES: usize = 200_000;
+const MAX_FILE_BYTES: usize = 512_000;
+
+fn git_output(cwd: &Path, args: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .map_err(|error| format!("git is unavailable: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn git_diff_output(cwd: &Path, extra: &[&str]) -> Result<String, String> {
+    let mut args = vec!["diff"];
+    if git_output(cwd, &["rev-parse", "--verify", "HEAD"]).is_ok() {
+        args.push("HEAD");
+    }
+    args.push("--no-color");
+    args.extend_from_slice(extra);
+    git_output(cwd, &args)
+}
+
+fn parse_numstat(text: &str) -> Vec<Value> {
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let additions = parts.next()?;
+            let deletions = parts.next()?;
+            let path = parts.next()?.to_string();
+            let binary = additions == "-" || deletions == "-";
+            Some(json!({
+                "path": path,
+                "additions": additions.parse::<u64>().unwrap_or(0),
+                "deletions": deletions.parse::<u64>().unwrap_or(0),
+                "binary": binary,
+            }))
+        })
+        .collect()
+}
+
+/// Read-only diff of the session workspace. Git never receives a client-controlled argument.
+async fn session_diff(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let session = lookup_owned(&state, &id).await?;
+    let cwd = PathBuf::from(&session.cwd);
+    let numstat = git_diff_output(&cwd, &["--numstat"]).map_err(bad_gateway)?;
+    let diff = git_diff_output(&cwd, &[]).map_err(bad_gateway)?;
+    let untracked =
+        git_output(&cwd, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
+    let mut files = parse_numstat(&numstat);
+    for path in untracked.lines().take(20) {
+        if path.is_empty() {
+            continue;
+        }
+        let additions = std::fs::read_to_string(cwd.join(path))
+            .map(|content| content.lines().count() as u64)
+            .unwrap_or(0);
+        files.push(json!({
+            "path": path,
+            "additions": additions,
+            "deletions": 0,
+            "binary": false,
+            "untracked": true,
+        }));
+    }
+    let truncated = diff.len() > MAX_DIFF_BYTES;
+    let mut cut = diff.len().min(MAX_DIFF_BYTES);
+    while !diff.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    Ok(Json(json!({
+        "files": files,
+        "diff": &diff[..cut],
+        "truncated": truncated,
+    })))
+}
+
+/// Read-only file peek for a path inside the session workspace.
+async fn session_file(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<FileQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let session = lookup_owned(&state, &id).await?;
+    let root = Path::new(&session.cwd)
+        .canonicalize()
+        .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+    let requested = Path::new(&query.path);
+    if requested.is_absolute()
+        || requested
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "path must stay inside the workspace".into(),
+        ));
+    }
+    let path = root
+        .join(requested)
+        .canonicalize()
+        .map_err(|error| (StatusCode::NOT_FOUND, error.to_string()))?;
+    if !path.starts_with(&root) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "path must stay inside the workspace".into(),
+        ));
+    }
+    let metadata =
+        std::fs::metadata(&path).map_err(|error| (StatusCode::NOT_FOUND, error.to_string()))?;
+    if !metadata.is_file() {
+        return Err((StatusCode::BAD_REQUEST, "not a file".into()));
+    }
+    if metadata.len() > MAX_FILE_BYTES as u64 {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "file is too large to peek".into(),
+        ));
+    }
+    let content = std::fs::read_to_string(&path).map_err(|_| {
+        (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "file is not UTF-8 text".into(),
+        )
+    })?;
+    Ok(Json(json!({
+        "path": query.path,
+        "content": content,
+        "lines": content.lines().count(),
+    })))
+}
+
+fn valid_branch(branch: &str) -> bool {
+    !branch.is_empty()
+        && branch.len() <= 100
+        && !branch.starts_with('-')
+        && !branch.starts_with('/')
+        && !branch.ends_with('/')
+        && !branch.contains("..")
+        && branch
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+}
+
+fn parse_worktrees(text: &str) -> Vec<Value> {
+    text.trim()
+        .split("\n\n")
+        .filter(|block| !block.trim().is_empty())
+        .map(|block| {
+            let mut path = String::new();
+            let mut branch = String::new();
+            let mut head = String::new();
+            let mut detached = false;
+            let mut bare = false;
+            for line in block.lines() {
+                if let Some(value) = line.strip_prefix("worktree ") {
+                    path = value.to_string();
+                } else if let Some(value) = line.strip_prefix("branch ") {
+                    branch = value.trim_start_matches("refs/heads/").to_string();
+                } else if let Some(value) = line.strip_prefix("HEAD ") {
+                    head = value.to_string();
+                } else if line == "detached" {
+                    detached = true;
+                } else if line == "bare" {
+                    bare = true;
+                }
+            }
+            json!({
+                "path": path,
+                "branch": branch,
+                "head": head,
+                "detached": detached,
+                "bare": bare,
+            })
+        })
+        .collect()
+}
+
+async fn session_worktrees(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let session = lookup_owned(&state, &id).await?;
+    let output = git_output(
+        Path::new(&session.cwd),
+        &["worktree", "list", "--porcelain"],
+    )
+    .map_err(bad_gateway)?;
+    Ok(Json(json!({ "worktrees": parse_worktrees(&output) })))
+}
+
+/// Creates a worktree with a fixed argv. The client cannot pass arbitrary git arguments, and the
+/// destination must stay inside `HELLDYE_WORKSPACES`. There is no delete route.
+async fn create_worktree(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<CreateWorktreeBody>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let session = lookup_owned(&state, &id).await?;
+    if !valid_branch(&body.branch) {
+        return Err((StatusCode::BAD_REQUEST, "invalid branch name".into()));
+    }
+    let requested = Path::new(&body.path);
+    if !requested.is_absolute()
+        || requested
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "worktree path must be absolute".into(),
+        ));
+    }
+    let parent = requested
+        .parent()
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "worktree path needs a parent".to_string(),
+        ))?
+        .canonicalize()
+        .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+    if !state.workspaces.iter().any(|root| parent.starts_with(root)) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "worktree path must stay inside HELLDYE_WORKSPACES".into(),
+        ));
+    }
+    if requested.exists() {
+        return Err((StatusCode::CONFLICT, "worktree path already exists".into()));
+    }
+    let path = requested.to_string_lossy().into_owned();
+    git_output(
+        Path::new(&session.cwd),
+        &["worktree", "add", &path, "-b", &body.branch],
+    )
+    .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    Ok(Json(json!({ "path": path, "branch": body.branch })))
+}
+
+/// Per-session action tools. Default is read-only; enabling requires `HELLDYE_ACTION_TOOLS` and an
+/// idle session. A change applies the next time Pi starts for this session only.
+async fn set_allow_edits(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<AllowEditsBody>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let session = lookup_owned(&state, &id).await?;
+    if session.ephemeral {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "ephemeral sessions are read-only".into(),
+        ));
+    }
+    if session.stdin.lock().await.is_some() || session.streaming.load(Ordering::SeqCst) {
+        return Err((
+            StatusCode::CONFLICT,
+            "stop the session before changing its tools".into(),
+        ));
+    }
+    if body.enabled {
+        let tools = env::var("HELLDYE_ACTION_TOOLS").map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "HELLDYE_ACTION_TOOLS is not configured".to_string(),
+            )
+        })?;
+        *session.tools_override.lock().await = Some(tools);
+    } else {
+        *session.tools_override.lock().await = None;
+    }
+    persist_sessions(&state).await;
+    eprintln!(
+        "allow-edits session={} enabled={}",
+        session.id, body.enabled
+    );
+    Ok(Json(json!({ "allowEdits": body.enabled })))
+}
+
 async fn session_state(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -1465,6 +1776,7 @@ fn new_session(
         on_host: AtomicBool::new(false),
         last_model: Mutex::new(None),
         last_thinking: Mutex::new(None),
+        tools_override: Mutex::new(None),
         stdin: Mutex::new(None),
         start: Mutex::new(()),
         seq: AtomicU64::new(0),
@@ -1486,6 +1798,14 @@ async fn ensure_started(state: &AppState, session: &Arc<Session>) -> Result<(), 
         return Ok(());
     }
     let name = session.name.read().await.clone();
+    // Resolve the per-session tool override before creating the env iterator: the iterator is not
+    // Send and must not live across an await in a handler's future.
+    let tools = session
+        .tools_override
+        .lock()
+        .await
+        .clone()
+        .unwrap_or_else(|| state.tools.clone());
     let environment = env::vars_os()
         .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)));
     let mut command = if session.ephemeral {
@@ -1500,7 +1820,7 @@ async fn ensure_started(state: &AppState, session: &Arc<Session>) -> Result<(), 
     } else {
         pi_command(
             &state.pi_bin,
-            &state.tools,
+            &tools,
             Path::new(&session.cwd),
             Some(&session.id),
             Some(&name),
@@ -1601,6 +1921,11 @@ async fn load_sessions(
                 session.on_host.store(item.on_host, Ordering::SeqCst);
                 *session.last_model.lock().await = item.model;
                 *session.last_thinking.lock().await = item.thinking;
+                if item.allow_edits {
+                    if let Ok(tools) = env::var("HELLDYE_ACTION_TOOLS") {
+                        *session.tools_override.lock().await = Some(tools);
+                    }
+                }
                 restored.insert(session.id.clone(), session);
             }
         }
@@ -1625,6 +1950,7 @@ async fn persist_sessions(state: &AppState) {
             model: session.last_model.lock().await.clone(),
             thinking: session.last_thinking.lock().await.clone(),
             on_host: session.on_host.load(Ordering::SeqCst),
+            allow_edits: session.tools_override.lock().await.is_some(),
         });
     }
     drop(sessions);
@@ -1965,10 +2291,11 @@ mod tests {
     use super::acquire_writer_lock;
     use super::{
         CachedModel, ContextFile, ImageBody, PromptContext, constant_time_eq, decode_base64,
-        ensure_token_file_outside_workspaces, info_payload, jpeg_dimensions, migrated_name,
-        neutral_name, paginate_messages, parse_session_metadata, pi_command, png_dimensions,
-        read_token_file, redact_stderr_line, resolve_workspace, resync_event, scan_import_dir,
-        should_reap, validate_images, write_state_atomically,
+        ensure_token_file_outside_workspaces, git_diff_output, info_payload, jpeg_dimensions,
+        migrated_name, neutral_name, paginate_messages, parse_numstat, parse_session_metadata,
+        parse_worktrees, pi_command, png_dimensions, read_token_file, redact_stderr_line,
+        resolve_workspace, resync_event, scan_import_dir, should_reap, valid_branch,
+        validate_images, write_state_atomically,
     };
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
@@ -2666,6 +2993,62 @@ mod tests {
         assert_eq!(candidates[0].id, "aaaa1111-bbbb-cccc-dddd-eeeeffff0000");
         assert_eq!(candidates[0].cwd, workspace.canonicalize().unwrap());
         assert_eq!(candidates[0].updated, 1_700_000_000);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn numstat_parsing_keeps_binary_rows() {
+        let files = parse_numstat("12\t3\tsrc/a.kt\n-\t-\tassets/logo.png\n");
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0]["path"], "src/a.kt");
+        assert_eq!(files[0]["additions"], 12);
+        assert_eq!(files[1]["binary"], true);
+    }
+
+    #[test]
+    fn worktree_parsing_reads_branch_and_detached_state() {
+        let parsed = parse_worktrees(
+            "worktree /repo\nHEAD abc123\nbranch refs/heads/main\n\nworktree /repo/wt\nHEAD def456\ndetached\n",
+        );
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0]["branch"], "main");
+        assert_eq!(parsed[1]["detached"], true);
+    }
+
+    #[test]
+    fn branch_validation_rejects_injection_shapes() {
+        assert!(valid_branch("feat/phase-6"));
+        assert!(!valid_branch("-Dmain"));
+        assert!(!valid_branch("main..other"));
+        assert!(!valid_branch("main;rm -rf /"));
+        assert!(!valid_branch("main\nother"));
+        assert!(!valid_branch(""));
+    }
+
+    #[test]
+    fn diff_reads_a_real_workspace_change() {
+        let dir = temp_dir("git-diff");
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .current_dir(&dir)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(status.status.success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-qm", "initial"]);
+        fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+
+        let diff = git_diff_output(&dir, &[]).unwrap();
+        assert!(diff.contains("+two"));
+        let files = parse_numstat(&git_diff_output(&dir, &["--numstat"]).unwrap());
+        assert_eq!(files[0]["path"], "a.txt");
+        assert_eq!(files[0]["additions"], 1);
         let _ = fs::remove_dir_all(&dir);
     }
 
