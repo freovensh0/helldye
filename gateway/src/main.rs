@@ -591,11 +591,7 @@ async fn create_session(
     let name = neutral_name(&id);
     let session = new_session(id.clone(), name, cwd, now_epoch(), false, body.ephemeral);
     let info = session.info().await;
-    state
-        .sessions
-        .write()
-        .await
-        .insert(id, session.clone());
+    state.sessions.write().await.insert(id, session.clone());
     if body.ephemeral {
         spawn_ephemeral_watchdog(state.clone(), session);
     } else {
@@ -1188,11 +1184,7 @@ async fn persist_sessions(state: &AppState) {
     let _ = tokio::fs::write(&state.state_file, bytes).await;
 }
 
-async fn read_stdout(
-    session: Arc<Session>,
-    stdout: tokio::process::ChildStdout,
-    state: AppState,
-) {
+async fn read_stdout(session: Arc<Session>, stdout: tokio::process::ChildStdout, state: AppState) {
     let mut lines = BufReader::new(stdout).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         let parsed = serde_json::from_str::<Value>(&line).ok();
@@ -1490,7 +1482,10 @@ mod tests {
     };
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
-    use axum::{Json, extract::{Path as AxumPath, State}};
+    use axum::{
+        Json,
+        extract::{Path as AxumPath, State},
+    };
     use std::{fs, path::PathBuf};
     use uuid::Uuid;
 
