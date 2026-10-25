@@ -60,6 +60,16 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     init {
         GatewaySessionStore.attach(settings)
         viewModelScope.launch(Dispatchers.IO) {
+            val pending = settings.loadPendingSubmit()
+            if (pending != null) {
+                settings.clearPendingSubmit()
+                _state.update {
+                    it.copy(
+                        editorPrefill = pending,
+                        notice = "The last send was interrupted. Review it and retry.",
+                    )
+                }
+            }
             val config = settings.load()
             if (config.url.isNotBlank() && GatewaySessionStore.sessionId != null &&
                 GatewaySessionStore.fingerprint == config.fingerprint
@@ -108,7 +118,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         if (ScreenshotStager.state.value != ScreenCaptureState.None) ScreenshotStager.clear()
 
         val display = prompt.ifBlank { "Use the attached context." }
-        addUserMessage(display)
+        settings.savePendingSubmit(display)
+        val optimisticId = addUserMessage(display)
         pendingUserEchoes.add(display)
         AssistantDraftStore.clear()
         _state.update {
@@ -137,9 +148,19 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     streamJob = null
                 }
                 pendingUserEchoes.clear()
+                settings.clearPendingSubmit()
+                // Roll the optimistic turn back and keep the draft: nothing was delivered.
+                AssistantDraftStore.attachments = attachments
                 _state.update {
                     it.copy(
                         streaming = false,
+                        messages = if (optimisticId == null) {
+                            it.messages
+                        } else {
+                            it.messages.filterNot { message -> message.id == optimisticId }
+                        },
+                        attachments = attachments,
+                        editorPrefill = prompt,
                         error = error.message ?: "Gateway request failed.",
                     )
                 }
@@ -223,6 +244,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     throw error
                 }
 
+                settings.savePendingSubmit(display)
                 gateway.prompt(
                     sessionId = session.id,
                     message = display,
@@ -235,14 +257,23 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     },
                 )
                 collector.await()
+                settings.clearPendingSubmit()
                 _state.update { it.copy(streaming = false) }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
                 screenCollectorJob?.cancel()
+                settings.clearPendingSubmit()
+                ScreenshotStager.clear()
+                // The screenshot is gone by contract; restore the text and non-screen attachments.
+                AssistantDraftStore.attachments = attachments
                 _state.update {
                     it.copy(
                         streaming = false,
+                        screenQuery = false,
+                        screenMessages = emptyList(),
+                        attachments = attachments,
+                        editorPrefill = prompt,
                         error = error.message ?: "Screen query failed.",
                     )
                 }
@@ -293,6 +324,15 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         val gateway = client ?: return
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { gateway.abort(sessionId) }
+                .onSuccess {
+                    // Keep STOPPING visible until the gateway settles the turn.
+                    _state.update { it.copy(stopping = true) }
+                }
+                .onFailure { error ->
+                    _state.update {
+                        it.copy(error = error.message ?: "Could not stop the turn.")
+                    }
+                }
         }
     }
 
@@ -689,6 +729,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                         currentModel = snapshot.model ?: state.currentModel,
                         thinkingLevel = snapshot.thinkingLevel ?: state.thinkingLevel,
                         streaming = state.streaming || snapshot.busy || snapshot.stopping,
+                        stopping = snapshot.stopping,
                     )
                 }
             }
@@ -826,7 +867,10 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             )
             GatewaySessionStore.epoch = snapshot.epoch ?: GatewaySessionStore.epoch
             _state.update {
-                it.copy(streaming = it.streaming || snapshot.busy || snapshot.stopping)
+                it.copy(
+                    streaming = it.streaming || snapshot.busy || snapshot.stopping,
+                    stopping = snapshot.stopping,
+                )
             }
         }
         // The transcript is authoritative; the event ring is only a live tail and can be cleared
@@ -992,7 +1036,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             "agent_settled" -> {
                 activeAssistantId = null
                 pendingUserEchoes.clear()
-                _state.update { it.copy(streaming = false) }
+                settings.clearPendingSubmit()
+                _state.update { it.copy(streaming = false, stopping = false) }
                 refreshStats()
             }
             "extension_ui_request" -> handleExtensionRequest(payload)
@@ -1336,22 +1381,27 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         return id
     }
 
-    private fun addUserMessage(text: String) {
-        if (text.isBlank()) return
+    /** Returns the new message id, or null when the echo was already present. */
+    private fun addUserMessage(text: String): String? {
+        if (text.isBlank()) return null
+        var added: String? = null
         _state.update { state ->
             val last = state.messages.lastOrNull()
             if (last?.role == ChatRole.User && last.text == text) {
                 state
             } else {
+                val id = UUID.randomUUID().toString()
+                added = id
                 state.copy(
                     messages = state.messages + ChatMessage(
-                        id = UUID.randomUUID().toString(),
+                        id = id,
                         role = ChatRole.User,
                         text = text,
                     ),
                 )
             }
         }
+        return added
     }
 }
 

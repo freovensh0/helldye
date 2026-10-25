@@ -67,6 +67,19 @@ class SettingsStore(context: Context) {
             ?.apply()
     }
 
+    /** A submit that was in flight when the process died; restored as a retry draft, never re-sent. */
+    fun savePendingSubmit(text: String) {
+        if (text.isBlank()) return
+        securePreferences?.edit()?.putString(KEY_PENDING_SUBMIT, text)?.apply()
+    }
+
+    fun loadPendingSubmit(): String? =
+        securePreferences?.getString(KEY_PENDING_SUBMIT, null)?.takeIf { it.isNotBlank() }
+
+    fun clearPendingSubmit() {
+        securePreferences?.edit()?.remove(KEY_PENDING_SUBMIT)?.apply()
+    }
+
     /** Returns false when the token could not be written to the Android Keystore. */
     fun save(config: GatewayConfig): Boolean {
         preferences.edit()
@@ -99,5 +112,6 @@ class SettingsStore(context: Context) {
         const val KEY_LAST_EVENT_ID = "session_last_event_id"
         const val KEY_SESSION_FINGERPRINT = "session_fingerprint"
         const val KEY_SESSION_EPOCH = "session_epoch"
+        const val KEY_PENDING_SUBMIT = "pending_submit"
     }
 }

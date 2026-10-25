@@ -50,6 +50,8 @@ data class AssistantUiState(
     val screenQuery: Boolean = false,
     val attachments: List<Attachment> = emptyList(),
     val streaming: Boolean = false,
+    /** Abort accepted by the gateway, not yet settled. */
+    val stopping: Boolean = false,
     val notice: String? = null,
     val error: String? = null,
     val sessionId: String? = null,
