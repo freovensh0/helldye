@@ -1064,7 +1064,7 @@ If the answer is long, put it in a `LazyColumn` with a single item or a `Column`
 - [ ] Loading reserves space; no shimmer; no full-screen spinner.
 - [ ] Streaming text appends without per-token animation.
 - [ ] Capture off, secure screen, no mic, no role, and error states are all reachable and readable.
-- [ ] Back closes the assistant; no screen content in recents (`FLAG_SECURE` when context is shown).
+- [ ] Back closes the assistant; no screen content in recents (`excludeFromRecents`; FLAG_SECURE removed by operator decision so assist screenshots work).
 - [ ] TalkBack order and content descriptions are correct.
 - [ ] 360×640, 390×844, 412×915; font scale 2.0×; no clipping.
 - [ ] Keyboard (IME) opens without covering the field or the primary action.
