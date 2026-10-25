@@ -20,7 +20,8 @@ HELLDYE_WORKSPACES=/home/you/projects \
 ```
 
 Environment: `HELLDYE_PI_BIN`, `HELLDYE_TOOLS`, `HELLDYE_TOKEN` or `HELLDYE_TOKEN_FILE`,
-`HELLDYE_WORKSPACES`, `HELLDYE_DEBUG`, `HELLDYE_STATE_FILE`.
+`HELLDYE_WORKSPACES`, `HELLDYE_DEBUG`, `HELLDYE_STATE_FILE`, `HELLDYE_IDLE_SECS` (default 1800, `0`
+disables the idle reaper).
 
 A bearer token is **required for every start, including loopback**. The gateway exits instead of
 serving `/v1` without one. Use `HELLDYE_TOKEN` or point `HELLDYE_TOKEN_FILE` at a file that is mode

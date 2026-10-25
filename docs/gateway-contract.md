@@ -41,16 +41,16 @@ never a command-line argument, and never enters the Pi child environment.
 | `GET` | `/v1/sessions` | — | `200`, array of `SessionInfo`, newest `created` first |
 | `POST` | `/v1/sessions` | `{cwd?, ephemeral?}` | `200` `SessionInfo` |
 | `GET` | `/v1/sessions/{id}` | — | `200` `SessionInfo` |
-| `DELETE` | `/v1/sessions/{id}` | — | `204`, empty body |
+| `DELETE` | `/v1/sessions/{id}` | — | `200` `{removed:true, transcriptKept:true}` |
 | `GET` | `/v1/sessions/{id}/events` | `?replay=true|false`, `Last-Event-ID` | `200` SSE |
-| `GET` | `/v1/sessions/{id}/messages` | — | `200` Pi `get_messages` data + `eventId` |
+| `GET` | `/v1/sessions/{id}/messages` | `?limit=1..500&before=INDEX` | `200` transcript page + `eventId`, `epoch`, `started`, `total`, `hasMore` |
 | `POST` | `/v1/sessions/{id}/prompt` | `{message, context?, images?}` | `200` `{accepted:true}` |
 | `POST` | `/v1/sessions/{id}/abort` | `{}` | `200` `{accepted:true}` |
 | `POST` | `/v1/sessions/{id}/compact` | `{}` | `200` `{accepted:true}` |
 | `POST` | `/v1/sessions/{id}/name` | `{name}` | `200` `SessionInfo` |
 | `GET` | `/v1/sessions/{id}/models` | — | `200` Pi `get_available_models` data |
 | `GET` | `/v1/sessions/{id}/commands` | — | `200` Pi `get_commands` data |
-| `GET` | `/v1/sessions/{id}/state` | — | `200` Pi `get_state` data |
+| `GET` | `/v1/sessions/{id}/state` | — | `200` gateway turn state (+ Pi `get_state` data when running) |
 | `POST` | `/v1/sessions/{id}/model` | `{provider, modelId}` | `200` Pi `set_model` data |
 | `GET` | `/v1/sessions/{id}/stats` | — | `200` Pi `get_session_stats` data |
 | `GET` | `/v1/sessions/{id}/thinking` | — | `200` Pi `get_available_thinking_levels` data |
@@ -60,11 +60,16 @@ never a command-line argument, and never enters the Pi child environment.
 ### 2.1 Session shape
 
 ```json
-{ "id": "uuid", "name": "Session 4F2A", "cwd": "/absolute/path", "status": "running|stopped", "created": 1760000000 }
+{
+  "id": "uuid", "name": "Session 4F2A", "cwd": "/absolute/path",
+  "status": "running|idle|stopped", "started": true, "busy": true, "created": 1760000000
+}
 ```
 
-- `status` is process state, not turn state. `running` means a Pi child is attached; `stopped` means it
-  exited or was never started.
+- `started` is process state. `false` means no Pi child is attached; reading the session does not start
+  one.
+- `busy` is turn state, true from prompt acceptance until `agent_settled`. `status` is `stopped` when
+  not started, `running` while busy, and `idle` when started but not busy.
 - `name` is generated as `Session <first 8 id characters, uppercase>`. It is never derived from a
   prompt. A rename is the only way to set a custom name, and it records that the name is explicit.
 - A state file from an older gateway has no explicit-name marker, so every stored name is replaced
@@ -79,6 +84,7 @@ never a command-line argument, and never enters the Pi child environment.
 {
   "version": "0.1.0",
   "piVersion": null,
+  "epoch": "gateway-instance-uuid",
   "capabilities": {
     "sessions": true, "images": true, "structuredContext": true, "workspaceAllowlist": true,
     "ephemeralSessions": true, "import": false, "fork": false, "export": false
@@ -87,7 +93,8 @@ never a command-line argument, and never enters the Pi child environment.
 ```
 
 It never exposes a binary path, workspace path, cwd, or environment value. `piVersion` is `null`
-until capability negotiation lands.
+until capability negotiation lands. `epoch` changes on every gateway start; a client must discard a
+stored cursor when the epoch differs (see §3.1).
 
 ### 2.2 Create
 
@@ -103,10 +110,20 @@ until capability negotiation lands.
 
 ### 2.3 Pi start behavior
 
-Today `/messages`, `models`, `commands`, `state`, `stats`, `thinking`, `abort`, `compact`, and
-`extension_ui_response` start the Pi child if it is stopped (`ensure_started`). The product contract says
-reading a transcript must not start Pi; Phase 5 changes that. Until then, opening a session can spawn
-Pi.
+Read paths never start Pi:
+
+- `/messages` on a stopped session returns `{started:false, messages:[], eventId, epoch}`; the Phase 5
+  host-transcript reader will serve its messages without a child.
+- `/state` on a stopped session returns `{started:false, busy:false, status:"stopped",
+  lastEventId, epoch}`.
+- `/events` on a stopped session emits one `not_started` SSE event and closes.
+
+`models`, `commands`, `stats`, `thinking`, `abort`, `compact`, and `extension_ui_response` still call
+`ensure_started` because they need a live Pi. The app opens the event stream only after a prompt or an
+explicit resume.
+
+An idle Pi child is stopped after `HELLDYE_IDLE_SECS` (default 1800, `0` disables) without a busy turn
+and without SSE subscribers. The session record is kept; the next prompt starts Pi again.
 
 ### 2.4 Prompt
 
@@ -136,17 +153,19 @@ Pi.
 - The response means "accepted by the gateway for delivery to Pi", not "turn finished". Output arrives on
   SSE.
 
-### 2.5 Messages and cursor
+### 2.5 Messages, pagination, and cursor
 
-`GET /messages` returns Pi's `get_messages` data with an added `eventId`:
+`GET /messages` returns the newest page by default (`limit` 500, `before` omitted):
 
 ```json
-{ "messages": [ ... ], "eventId": 42 }
+{ "started": true, "messages": [ ... ], "total": 512, "hasMore": true, "eventId": 42, "epoch": "uuid" }
 ```
 
-`eventId` is the per-session event id at the moment Pi answered. Open the event stream with
-`Last-Event-ID: 42` to receive events after the transcript snapshot. The app loads `/messages` on every
-session open, not only after a restart.
+- `limit` is clamped to `1..=500`. `before` is an exclusive index into Pi's full message list; pass the
+  start index of the previous page to walk backwards. The app keeps list keys stable while prepending.
+- `eventId` is the per-session event id at the moment Pi answered. Open the event stream with
+  `Last-Event-ID: 42` to receive events after the transcript snapshot.
+- `started:false` means Pi is stopped; the gateway never spawns it for this route.
 
 ### 2.6 Rename
 
@@ -156,9 +175,10 @@ marks the name as explicit. If Pi is running, the gateway also sends `set_sessio
 
 ### 2.7 Session removal
 
-`DELETE /v1/sessions/{id}` removes the gateway record, rewrites the state file, drops Pi's stdin, and
-returns `204`. The Pi child exits when its stdin closes; the gateway sends no signal and does not wait.
-The Pi session file stays on the host. There is no purge route: see §6.
+`DELETE /v1/sessions/{id}` removes the gateway record, atomically rewrites the state file, drops Pi's
+stdin, and returns `{"removed":true,"transcriptKept":true}`. The Pi child exits when its stdin closes;
+the gateway sends no signal and does not wait. The Pi session file stays on the host. There is no purge
+route: see §6. The app must call this "Remove from list", never "delete the transcript".
 
 ## 3. SSE
 
@@ -168,12 +188,19 @@ Accept: text/event-stream
 Last-Event-ID: 42
 ```
 
-- `id:` is a per-session `u64`, starting at 1.
+- `id:` is a per-session `u64`, starting at 1. Synthetic gateway events (`gateway_epoch`, `not_started`,
+  `resync`) carry no id, so they never advance the client cursor.
 - `event:` is Pi's `type` field from the JSON line (for example `agent_start`, `agent_settled`, a
   message or tool event), or `raw` when the line is not JSON.
-- `data:` is the raw JSON line Pi wrote, unmodified.
+- `data:` is the raw JSON line Pi wrote, unmodified, for Pi events.
+- `gateway_epoch` is sent first on every stream: `{"type":"gateway_epoch","epoch":"uuid"}`.
 - `gateway_exit` is gateway-generated with `{"type":"gateway_exit","reason":"pi exited"}` when the Pi
   child exits.
+- `not_started` is emitted alone when the session has no Pi child; the stream then closes and Pi is not
+  spawned.
+- `resync` is emitted if the broadcast ring drops events for a slow subscriber:
+  `{"type":"resync","reason":"lagged","lastEventId":"41"}`. The stream then closes. The client must
+  `GET /messages` and reconnect after the returned `eventId`; it must never continue past a silent gap.
 - A keep-alive comment is sent every 15 seconds.
 
 Replay:
@@ -183,33 +210,31 @@ Replay:
 - `?replay=false` starts at the current id; only new events are sent.
 - The buffer is an in-memory ring of 4,096 events per session. Older events are gone; `/messages` is the
   durable path.
-- The broadcast channel holds 2,048 events; a subscriber that falls behind skips missed events silently
-  and continues with the next one.
+- Subscribers that fall behind the broadcast channel receive `resync`, not a silent skip.
 
 ### 3.1 `eventId` and epochs
 
-There is no `epoch` field and no epoch route. An epoch is one gateway process lifetime:
+The gateway instance id is the epoch, exposed as `epoch` on `/v1/info`, `/v1/sessions/{id}/state`,
+`/messages`, and the first SSE event (`gateway_epoch`).
 
-- ids increase monotonically per session for the life of the gateway process, including across a Pi
-  restart (the event buffer is cleared, the counter is not);
-- a gateway process restart restores the session records with the counter at 0, so the next event is id
-  1 again;
-- a `404` means the session record is gone.
-
-A client that sees a lower id than its cursor, or a `404`, must treat the stream as a new epoch: reload
-`/messages`, replace the transcript, and stream after the returned `eventId`. Never concatenate events
-from two epochs.
+- Event ids increase monotonically per session for the life of the gateway process, including across a
+  Pi restart.
+- A gateway process restart gets a new epoch and per-session ids start at 1 again.
+- A client that sees a different epoch, a lower id than its cursor, or a `404` must discard the cursor:
+  reload `/messages`, replace the transcript, and stream after the returned `eventId`. Never
+  concatenate events from two epochs.
 
 ## 4. Busy and streaming
 
-There is no `busy` field on the wire. Turn state is derived from SSE:
+`busy` is on the wire in `SessionInfo` and `/state`; it is true from prompt acceptance until
+`agent_settled`.
 
-- `agent_start` sets streaming; `agent_settled` clears it;
-- the gateway uses the same flag to decide `streamingBehavior: "steer"`;
+- `agent_start` also sets the streaming flag; `agent_settled` clears it.
+- The gateway uses the same flag to decide `streamingBehavior: "steer"`.
+- `abort` sets `stopping` until `agent_settled`; `/state` exposes it.
 - `gateway_exit` means the Pi child is gone; `status` becomes `stopped`.
 
-The client must treat `status: running` as "process alive", not "turn in progress". Send is allowed
-while busy; the gateway marks a prompt sent during a turn as a steer.
+Send is allowed while busy; the gateway marks a prompt sent during a turn as a steer.
 
 ## 5. Errors
 
@@ -233,7 +258,8 @@ The app surfaces `HTTP <code>: <body>`; do not parse the body for branching.
 - The gateway writes no prompt, image, or transcript to its own disk path. Pi owns transcripts.
 - `sessions.json` (`HELLDYE_STATE_FILE` or `~/.local/share/helldye/sessions.json`) stores only
   `id`, `name`, `cwd`, `created`, and whether the name is explicit. It is rewritten in full on create,
-  rename, delete, and state migration; the write is not atomic.
+  rename, delete, and state migration. The write is atomic (temp file, fsync, rename, directory fsync)
+  and serialized, so a crash leaves either the previous file or the new one.
 - An ephemeral screen-query session never enters `sessions.json` and never appears in the session
   list. See §6.1.
 - On load, a record whose `cwd` is outside the current workspace allowlist is dropped, and a record
@@ -257,7 +283,8 @@ in-memory session record:
   flow: Pi keeps no session file, so there is no transcript to read back;
 - the record is deleted when Pi emits `agent_settled` (the answer has been streamed), when the client
   sends `DELETE /v1/sessions/{id}`, or after 120 seconds with no event. The last case only bounds an
-  abandoned screen query; it is not the Phase 4 idle reaper (R-07), which will govern normal sessions;
+  abandoned screen query; the normal idle reaper (`HELLDYE_IDLE_SECS`) separately stops — but keeps the
+  record of — idle persistent sessions;
 - no prompt, image, or answer from an ephemeral session is persisted by the gateway, and the gateway
   never writes the image to disk. The image is base64 in memory and goes to the Pi child's stdin only.
 
