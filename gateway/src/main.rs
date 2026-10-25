@@ -56,7 +56,7 @@ struct Session {
     streaming: AtomicBool,
     events: Mutex<VecDeque<WireEvent>>,
     tx: broadcast::Sender<WireEvent>,
-    pending: Mutex<HashMap<String, oneshot::Sender<Value>>>,
+    pending: Mutex<HashMap<String, oneshot::Sender<(Value, u64)>>>,
     status: Mutex<String>,
     created: u64,
 }
@@ -162,7 +162,19 @@ impl Session {
         let _ = self.tx.send(event);
     }
 
-    async fn request(&self, mut command: Value, timeout: Duration) -> Result<Value, String> {
+    async fn request(&self, command: Value, timeout: Duration) -> Result<Value, String> {
+        self.request_with_cursor(command, timeout)
+            .await
+            .map(|(response, _)| response)
+    }
+
+    /// Returns the response with the last event id Pi had emitted when it answered. The caller can
+    /// stream from that id to resume without replaying events already covered by the response.
+    async fn request_with_cursor(
+        &self,
+        mut command: Value,
+        timeout: Duration,
+    ) -> Result<(Value, u64), String> {
         let id = Uuid::new_v4().to_string();
         command["id"] = json!(id);
         let (tx, rx) = oneshot::channel();
@@ -677,11 +689,15 @@ async fn session_messages(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let session = lookup_started(&state, &id).await?;
-    let response = session
-        .request(json!({ "type": "get_messages" }), Duration::from_secs(15))
+    let (response, event_id) = session
+        .request_with_cursor(json!({ "type": "get_messages" }), Duration::from_secs(15))
         .await
         .map_err(bad_gateway)?;
-    command_data(response).map(Json)
+    let mut data = command_data(response)?;
+    if let Some(object) = data.as_object_mut() {
+        object.insert("eventId".to_string(), json!(event_id));
+    }
+    Ok(Json(data))
 }
 
 async fn lookup_owned(state: &AppState, id: &str) -> Result<Arc<Session>, (StatusCode, String)> {
@@ -833,8 +849,10 @@ async fn read_stdout(session: Arc<Session>, stdout: tokio::process::ChildStdout)
         if let Some(response) = parsed.as_ref() {
             if response.get("type").and_then(Value::as_str) == Some("response") {
                 if let Some(id) = response.get("id").and_then(Value::as_str) {
+                    // Everything emitted before this response is reflected in its payload.
+                    let cursor = session.seq.load(Ordering::SeqCst);
                     if let Some(tx) = session.pending.lock().await.remove(id) {
-                        let _ = tx.send(response.clone());
+                        let _ = tx.send((response.clone(), cursor));
                     }
                 }
             }

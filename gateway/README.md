@@ -80,7 +80,7 @@ All `/v1` routes require `Authorization: Bearer <token>` when a token is configu
 | `GET` | `/v1/sessions/{id}` | Session status. |
 | `DELETE` | `/v1/sessions/{id}` | Close stdin and let Pi exit. |
 | `GET` | `/v1/sessions/{id}/events` | SSE stream; supports `Last-Event-ID` and `?replay=false`. |
-| `GET` | `/v1/sessions/{id}/messages` | Full Pi transcript. |
+| `GET` | `/v1/sessions/{id}/messages` | Full Pi transcript plus the `eventId` it reflects. |
 | `POST` | `/v1/sessions/{id}/prompt` | Send `message`, optional `context`, optional `images`. |
 | `POST` | `/v1/sessions/{id}/abort` | Abort the active turn. |
 | `GET` | `/v1/sessions/{id}/models` | Models configured in Pi. |
@@ -102,8 +102,10 @@ All `/v1` routes require `Authorization: Bearer <token>` when a token is configu
 - Event replay is an in-memory ring of 4,096 events per session. The session list is persisted to
   `~/.local/share/helldye/sessions.json` (`HELLDYE_STATE_FILE` overrides it), and Pi keeps each
   session's transcript in its own session file; restarting the gateway resumes it on the next request.
-- A stopped session is started lazily with `pi --session-id <id>`; the app loads `/messages` first and
-  then opens the event stream with `?replay=false`.
+- A session is started lazily with `pi --session-id <id>`. The app always loads `/messages` first
+  (whenever the session is opened, not only after a gateway restart), restores the transcript, and
+  then opens the event stream from the returned `eventId`, so old history never depends on the
+  in-memory replay ring.
 - Prompts are accepted asynchronously; streamed output and command responses arrive on SSE.
 - Pi-Bolt's stderr is logged to the gateway's stderr. Do not put screen text in prompts that you do
   not want visible in transport or Pi logs.

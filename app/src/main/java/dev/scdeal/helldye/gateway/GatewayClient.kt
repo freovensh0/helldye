@@ -62,6 +62,12 @@ data class GatewayState(
     val thinkingLevel: String?,
 )
 
+/** Pi transcript plus the event cursor it reflects, so the client can resume the stream without duplicates. */
+data class GatewayTranscript(
+    val messages: JSONArray,
+    val eventId: String?,
+)
+
 class GatewayException(message: String) : Exception(message)
 
 class GatewayClient(private val config: GatewayConfig) {
@@ -152,9 +158,12 @@ class GatewayClient(private val config: GatewayConfig) {
         )
     }
 
-    fun messages(sessionId: String): JSONArray {
+    fun messages(sessionId: String): GatewayTranscript {
         val response = request("GET", "/sessions/$sessionId/messages")
-        return response.optJSONArray("messages") ?: JSONArray()
+        return GatewayTranscript(
+            messages = response.optJSONArray("messages") ?: JSONArray(),
+            eventId = response.optString("eventId").takeIf { it.isNotBlank() },
+        )
     }
 
     fun renameSession(sessionId: String, name: String): GatewaySession {

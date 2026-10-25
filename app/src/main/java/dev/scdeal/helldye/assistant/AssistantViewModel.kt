@@ -61,7 +61,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     return@launch
                 }
                 _state.update { it.copy(sessionId = sessionId) }
-                attach(gateway, sessionId, info.getOrNull()?.status)
+                attach(gateway, sessionId)
             }
         }
     }
@@ -388,8 +388,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
                 val gateway = ensureClient(config)
-                val info = gateway.session(sessionId)
-                attach(gateway, sessionId, info.status)
+                gateway.session(sessionId)
+                attach(gateway, sessionId)
             }.onFailure { error ->
                 _state.update {
                     it.copy(error = error.message ?: "Could not open the session.")
@@ -474,8 +474,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         capabilitiesJob?.cancel()
         capabilitiesJob = null
         dialogTimeoutJob?.cancel()
-        // Reattach by replaying the gateway buffer; the session itself stays alive.
-        GatewaySessionStore.lastEventId = null
+        // The session stays alive with the gateway; the next attach restores it from the transcript.
         super.onCleared()
     }
 
@@ -572,6 +571,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                         GatewaySessionStore.lastEventId,
                         replay = !skip,
                     ).collect { event ->
+                        if (GatewaySessionStore.sessionId != sessionId) return@collect
                         skip = false
                         event.id?.let { GatewaySessionStore.lastEventId = it }
                         handleEvent(event)
@@ -595,10 +595,19 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    private fun attach(gateway: GatewayClient, sessionId: String, status: String?) {
-        if (status == "stopped") {
-            runCatching { gateway.messages(sessionId) }.onSuccess { restoreMessages(it) }
-            startStream(gateway, sessionId, skipReplay = true)
+    private fun attach(gateway: GatewayClient, sessionId: String) {
+        // The transcript is authoritative; the event ring is only a live tail and can be cleared
+        // when Pi restarts. Always restore first, then resume the stream after that snapshot.
+        val transcript = runCatching { gateway.messages(sessionId) }.getOrNull()
+        if (GatewaySessionStore.sessionId != sessionId) return
+        if (transcript != null) {
+            // A prompt sent while the transcript loaded already owns the conversation.
+            val restored = _state.value.messages.isEmpty()
+            if (restored) {
+                restoreMessages(transcript.messages)
+                GatewaySessionStore.lastEventId = transcript.eventId
+            }
+            startStream(gateway, sessionId, skipReplay = !restored || transcript.eventId == null)
         } else {
             startStream(gateway, sessionId)
         }
@@ -606,67 +615,11 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun restoreMessages(messages: JSONArray) {
-        val restored = mutableListOf<ChatMessage>()
-        val tools = mutableMapOf<String, Int>()
-        for (index in 0 until messages.length()) {
-            val message = messages.optJSONObject(index) ?: continue
-            when (message.optString("role")) {
-                "user" -> {
-                    val text = UserMessageText.clean(messageText(message))
-                    if (text.isNotBlank()) {
-                        restored += ChatMessage(
-                            UUID.randomUUID().toString(),
-                            ChatRole.User,
-                            text,
-                        )
-                    }
-                }
-                "assistant" -> {
-                    val text = messageText(message)
-                    val thinking = messageThinking(message)
-                    if (text.isNotBlank() || thinking.isNotBlank()) {
-                        restored += ChatMessage(
-                            UUID.randomUUID().toString(),
-                            ChatRole.Assistant,
-                            text,
-                            thinking,
-                        )
-                    }
-                    val content = message.optJSONArray("content") ?: continue
-                    for (blockIndex in 0 until content.length()) {
-                        val block = content.optJSONObject(blockIndex) ?: continue
-                        if (block.optString("type") != "toolCall") continue
-                        val callId = block.optString("id")
-                        if (callId.isBlank()) continue
-                        val name = block.optString("name")
-                        tools[callId] = restored.size
-                        restored += ChatMessage(
-                            id = "tool-$callId",
-                            role = ChatRole.Tool,
-                            text = name,
-                            tool = ToolInfo(
-                                name = name,
-                                args = clip(block.optJSONObject("arguments")?.toString(2).orEmpty()),
-                            ),
-                        )
-                    }
-                }
-                "toolResult" -> {
-                    val callId = message.optString("toolCallId")
-                    val at = tools[callId] ?: continue
-                    val tool = restored[at].tool ?: continue
-                    restored[at] = restored[at].copy(
-                        tool = tool.copy(
-                            result = clip(toolResultText(message)),
-                            running = false,
-                            failed = message.optBoolean("isError"),
-                        ),
-                    )
-                }
-            }
-        }
-        activeAssistantId = null
-        _state.update { it.copy(messages = restored) }
+        val restored = SessionTranscript.restore(messages)
+        toolMessages.clear()
+        toolMessages.putAll(restored.toolMessageIds)
+        activeAssistantId = restored.trailingAssistantId
+        _state.update { it.copy(messages = restored.messages) }
     }
 
     private fun handleEvent(event: GatewayEvent) {
@@ -687,7 +640,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                         if (pendingUserEchoes.isNotEmpty()) {
                             pendingUserEchoes.poll()
                         } else {
-                            addUserMessage(UserMessageText.clean(messageText(message)))
+                            addUserMessage(UserMessageText.clean(SessionTranscript.messageText(message)))
                         }
                     }
                     "assistant" -> {
@@ -698,7 +651,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                                 messages = it.messages + ChatMessage(
                                     id = id,
                                     role = ChatRole.Assistant,
-                                    text = messageText(message),
+                                    text = SessionTranscript.messageText(message),
                                 ),
                             )
                         }
@@ -719,13 +672,19 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 if (message.optString("role") == "assistant") {
                     val id = activeAssistantId
                     if (id != null) {
-                        finalizeAssistant(id, messageText(message), messageThinking(message))
+                        finalizeAssistant(
+                            id,
+                            SessionTranscript.messageText(message),
+                            SessionTranscript.messageThinking(message),
+                        )
                     }
                     activeAssistantId = null
                 }
             }
             "tool_execution_start" -> {
                 val callId = payload.optString("toolCallId")
+                // A restored transcript already has this card; replayed starts must not duplicate it.
+                if (toolMessages.containsKey(callId)) return
                 val name = payload.optString("toolName")
                 val id = "tool-$callId-${UUID.randomUUID()}"
                 toolMessages[callId] = id
@@ -737,7 +696,9 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                             text = name,
                             tool = ToolInfo(
                                 name = name,
-                                args = clip(payload.optJSONObject("args")?.toString(2).orEmpty()),
+                                args = SessionTranscript.clip(
+                                    payload.optJSONObject("args")?.toString(2).orEmpty(),
+                                ),
                             ),
                         ),
                     )
@@ -745,13 +706,17 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             }
             "tool_execution_update" -> {
                 val id = toolMessages[payload.optString("toolCallId")] ?: return
-                val result = toolResultText(payload.optJSONObject("partialResult"))
+                val result = SessionTranscript.toolResultText(payload.optJSONObject("partialResult"))
                 _state.update { state ->
                     state.copy(
                         messages = state.messages.map { message ->
                             val tool = message.tool
                             if (message.id == id && tool != null) {
-                                message.copy(tool = tool.copy(result = clip(result)))
+                                message.copy(
+                                    tool = tool.copy(
+                                        result = SessionTranscript.clip(result),
+                                    ),
+                                )
                             } else {
                                 message
                             }
@@ -762,7 +727,9 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             "tool_execution_end" -> {
                 val callId = payload.optString("toolCallId")
                 val id = toolMessages.remove(callId) ?: return
-                val result = clip(toolResultText(payload.optJSONObject("result")))
+                val result = SessionTranscript.clip(
+                    SessionTranscript.toolResultText(payload.optJSONObject("result")),
+                )
                 val failed = payload.optBoolean("isError")
                 val duration = payload.optLong("durationMs").takeIf { it > 0 }
                 _state.update { state ->
@@ -1023,51 +990,6 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             }
         }
     }
-
-    private fun messageText(message: JSONObject): String {
-        val content = message.opt("content") ?: return ""
-        return when (content) {
-            is String -> content
-            is JSONArray -> buildString {
-                for (index in 0 until content.length()) {
-                    val block = content.optJSONObject(index) ?: continue
-                    if (block.optString("type") == "text") append(block.optString("text"))
-                }
-            }
-            else -> ""
-        }
-    }
-
-    private fun messageThinking(message: JSONObject): String {
-        val content = message.opt("content")
-        if (content !is JSONArray) return ""
-        return buildString {
-            for (index in 0 until content.length()) {
-                val block = content.optJSONObject(index) ?: continue
-                if (block.optString("type") == "thinking") append(block.optString("thinking"))
-            }
-        }
-    }
-
-    private fun toolResultText(result: JSONObject?): String {
-        if (result == null) return ""
-        return when (val content = result.opt("content")) {
-            is String -> content
-            is JSONArray -> buildString {
-                for (index in 0 until content.length()) {
-                    val block = content.optJSONObject(index) ?: continue
-                    if (block.optString("type") != "text") continue
-                    if (isNotEmpty()) append('\n')
-                    append(block.optString("text"))
-                }
-            }
-            else -> result.toString(2)
-        }
-    }
-
-    private fun clip(text: String): String =
-        if (text.length <= 16_000) text else text.take(16_000) + "\n…"
-
 }
 
 /** Used when the gateway predates the thinking-level endpoint; Pi still validates the chosen level. */
