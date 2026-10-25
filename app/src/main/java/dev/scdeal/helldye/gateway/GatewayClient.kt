@@ -66,12 +66,22 @@ data class GatewayStats(
 data class GatewayState(
     val model: GatewayModel?,
     val thinkingLevel: String?,
+    val started: Boolean = false,
+    val busy: Boolean = false,
+    val stopping: Boolean = false,
+    val status: String = "stopped",
+    val lastEventId: String? = null,
+    val epoch: String? = null,
 )
 
 /** Pi transcript plus the event cursor it reflects, so the client can resume the stream without duplicates. */
 data class GatewayTranscript(
     val messages: JSONArray,
     val eventId: String?,
+    val started: Boolean = true,
+    val epoch: String? = null,
+    val total: Int = messages.length(),
+    val hasMore: Boolean = false,
 )
 
 class GatewayException(message: String) : Exception(message)
@@ -181,11 +191,20 @@ class GatewayClient(private val config: GatewayConfig) {
         )
     }
 
-    fun messages(sessionId: String): GatewayTranscript {
-        val response = request("GET", "/sessions/$sessionId/messages")
+    fun messages(sessionId: String, limit: Int? = null, before: Int? = null): GatewayTranscript {
+        val query = buildList {
+            limit?.let { add("limit=$it") }
+            before?.let { add("before=$it") }
+        }.joinToString("&")
+        val path = "/sessions/$sessionId/messages" + if (query.isEmpty()) "" else "?$query"
+        val response = request("GET", path)
         return GatewayTranscript(
             messages = response.optJSONArray("messages") ?: JSONArray(),
             eventId = response.optString("eventId").takeIf { it.isNotBlank() },
+            started = response.optBoolean("started", true),
+            epoch = response.optString("epoch").takeIf { it.isNotBlank() },
+            total = response.optInt("total", response.optJSONArray("messages")?.length() ?: 0),
+            hasMore = response.optBoolean("hasMore", false),
         )
     }
 
@@ -236,6 +255,12 @@ class GatewayClient(private val config: GatewayConfig) {
         return GatewayState(
             model = response.optJSONObject("model")?.let(::model),
             thinkingLevel = response.optString("thinkingLevel").takeIf { it.isNotBlank() },
+            started = response.optBoolean("started", false),
+            busy = response.optBoolean("busy", false),
+            stopping = response.optBoolean("stopping", false),
+            status = response.optString("status", "stopped"),
+            lastEventId = response.optString("lastEventId").takeIf { it.isNotBlank() },
+            epoch = response.optString("epoch").takeIf { it.isNotBlank() },
         )
     }
 

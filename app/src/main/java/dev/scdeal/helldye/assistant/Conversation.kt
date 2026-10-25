@@ -46,6 +46,13 @@ object Conversation {
         return result
     }
 
+    /**
+     * Keep following streaming output only while the reader is near the bottom. Scrolling up releases
+     * the pin so tokens do not fight the reader; returning to the bottom re-arms it.
+     */
+    fun shouldPinToBottom(lastVisibleIndex: Int, totalItems: Int): Boolean =
+        totalItems == 0 || lastVisibleIndex >= totalItems - 2
+
     fun toolSummary(tools: List<ToolInfo>): String {
         val failed = tools.count { it.failed }
         val running = tools.count { it.running }

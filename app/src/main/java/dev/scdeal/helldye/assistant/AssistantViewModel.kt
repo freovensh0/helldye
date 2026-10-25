@@ -58,7 +58,18 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     private var dialogTimeoutJob: Job? = null
 
     init {
+        GatewaySessionStore.attach(settings)
         viewModelScope.launch(Dispatchers.IO) {
+            val pending = settings.loadPendingSubmit()
+            if (pending != null) {
+                settings.clearPendingSubmit()
+                _state.update {
+                    it.copy(
+                        editorPrefill = pending,
+                        notice = "The last send was interrupted. Review it and retry.",
+                    )
+                }
+            }
             val config = settings.load()
             if (config.url.isNotBlank() && GatewaySessionStore.sessionId != null &&
                 GatewaySessionStore.fingerprint == config.fingerprint
@@ -107,7 +118,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         if (ScreenshotStager.state.value != ScreenCaptureState.None) ScreenshotStager.clear()
 
         val display = prompt.ifBlank { "Use the attached context." }
-        addUserMessage(display)
+        settings.savePendingSubmit(display)
+        val optimisticId = addUserMessage(display)
         pendingUserEchoes.add(display)
         AssistantDraftStore.clear()
         _state.update {
@@ -118,8 +130,6 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             try {
                 val gateway = ensureClient(config)
                 val session = ensureSession(gateway, config)
-                startStream(gateway, session.id)
-                refreshCapabilities(gateway, session.id, announce = false)
                 gateway.prompt(
                     sessionId = session.id,
                     message = prompt.ifBlank { "Use the attached context." },
@@ -128,6 +138,9 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                         GatewayImage(it.mimeType, it.base64)
                     },
                 )
+                // The gateway buffers events, so subscribing after acceptance cannot lose a turn.
+                startStream(gateway, session.id)
+                refreshCapabilities(gateway, session.id, announce = false)
             } catch (error: Exception) {
                 if (error is GatewayException && error.message?.contains("HTTP 404") == true) {
                     GatewaySessionStore.reset()
@@ -135,9 +148,19 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     streamJob = null
                 }
                 pendingUserEchoes.clear()
+                settings.clearPendingSubmit()
+                // Roll the optimistic turn back and keep the draft: nothing was delivered.
+                AssistantDraftStore.attachments = attachments
                 _state.update {
                     it.copy(
                         streaming = false,
+                        messages = if (optimisticId == null) {
+                            it.messages
+                        } else {
+                            it.messages.filterNot { message -> message.id == optimisticId }
+                        },
+                        attachments = attachments,
+                        editorPrefill = prompt,
                         error = error.message ?: "Gateway request failed.",
                     )
                 }
@@ -221,6 +244,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     throw error
                 }
 
+                settings.savePendingSubmit(display)
                 gateway.prompt(
                     sessionId = session.id,
                     message = display,
@@ -233,14 +257,23 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     },
                 )
                 collector.await()
+                settings.clearPendingSubmit()
                 _state.update { it.copy(streaming = false) }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
                 screenCollectorJob?.cancel()
+                settings.clearPendingSubmit()
+                ScreenshotStager.clear()
+                // The screenshot is gone by contract; restore the text and non-screen attachments.
+                AssistantDraftStore.attachments = attachments
                 _state.update {
                     it.copy(
                         streaming = false,
+                        screenQuery = false,
+                        screenMessages = emptyList(),
+                        attachments = attachments,
+                        editorPrefill = prompt,
                         error = error.message ?: "Screen query failed.",
                     )
                 }
@@ -291,6 +324,15 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         val gateway = client ?: return
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { gateway.abort(sessionId) }
+                .onSuccess {
+                    // Keep STOPPING visible until the gateway settles the turn.
+                    _state.update { it.copy(stopping = true) }
+                }
+                .onFailure { error ->
+                    _state.update {
+                        it.copy(error = error.message ?: "Could not stop the turn.")
+                    }
+                }
         }
     }
 
@@ -678,17 +720,35 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         capabilitiesSessionId = sessionId
         capabilitiesJob = viewModelScope.launch(Dispatchers.IO) {
             _state.update { it.copy(capabilitiesLoading = true) }
+            // Read gateway state first; every capability route below needs a live Pi child.
+            val snapshot = runCatching { gateway.state(sessionId) }.getOrNull()
+            if (snapshot != null) {
+                GatewaySessionStore.epoch = snapshot.epoch ?: GatewaySessionStore.epoch
+                _state.update { state ->
+                    state.copy(
+                        currentModel = snapshot.model ?: state.currentModel,
+                        thinkingLevel = snapshot.thinkingLevel ?: state.thinkingLevel,
+                        streaming = state.streaming || snapshot.busy || snapshot.stopping,
+                        stopping = snapshot.stopping,
+                    )
+                }
+            }
+            if (snapshot?.started != true) {
+                // Opening a stopped session must not spawn Pi. A later prompt retries.
+                capabilitiesSessionId = null
+                _state.update { it.copy(capabilitiesLoading = false) }
+                return@launch
+            }
             val models = runCatching { gateway.models(sessionId) }
             val commands = runCatching { gateway.commands(sessionId) }
-            val sessionState = runCatching { gateway.state(sessionId) }
             val stats = runCatching { gateway.stats(sessionId) }
             val levels = runCatching { gateway.thinkingLevels(sessionId) }
             _state.update { state ->
                 state.copy(
                     models = models.getOrElse { state.models },
                     commands = commands.getOrElse { state.commands },
-                    currentModel = sessionState.getOrNull()?.model ?: state.currentModel,
-                    thinkingLevel = sessionState.getOrNull()?.thinkingLevel ?: state.thinkingLevel,
+                    currentModel = snapshot?.model ?: state.currentModel,
+                    thinkingLevel = snapshot?.thinkingLevel ?: state.thinkingLevel,
                     thinkingLevels = levels.getOrElse { state.thinkingLevels }
                         .ifEmpty { FALLBACK_THINKING_LEVELS },
                     stats = stats.getOrElse { state.stats },
@@ -756,6 +816,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         streamJob = viewModelScope.launch(Dispatchers.IO) {
             var skip = skipReplay
             while (isActive) {
+                var notStarted = false
                 try {
                     gateway.events(
                         sessionId,
@@ -764,8 +825,16 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     ).collect { event ->
                         if (GatewaySessionStore.sessionId != sessionId) return@collect
                         skip = false
+                        if (event.payload.optString("type") == "not_started") {
+                            notStarted = true
+                            return@collect
+                        }
                         event.id?.let { GatewaySessionStore.lastEventId = it }
                         handleEvent(event)
+                    }
+                    if (notStarted) {
+                        streamJob = null
+                        return@launch
                     }
                     delay(1_000)
                 } catch (error: Exception) {
@@ -787,6 +856,23 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun attach(gateway: GatewayClient, sessionId: String) {
+        // Gateway state tells us whether Pi is alive and busy without starting it.
+        val snapshot = runCatching { gateway.state(sessionId) }.getOrNull()
+        if (GatewaySessionStore.sessionId != sessionId) return
+        if (snapshot != null) {
+            GatewaySessionStore.lastEventId = GatewaySessionStore.reconcileCursor(
+                storedEpoch = GatewaySessionStore.epoch,
+                stateEpoch = snapshot.epoch,
+                cursor = GatewaySessionStore.lastEventId,
+            )
+            GatewaySessionStore.epoch = snapshot.epoch ?: GatewaySessionStore.epoch
+            _state.update {
+                it.copy(
+                    streaming = it.streaming || snapshot.busy || snapshot.stopping,
+                    stopping = snapshot.stopping,
+                )
+            }
+        }
         // The transcript is authoritative; the event ring is only a live tail and can be cleared
         // when Pi restarts. Always restore first, then resume the stream after that snapshot.
         val transcript = runCatching { gateway.messages(sessionId) }.getOrNull()
@@ -797,12 +883,30 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             if (restored) {
                 restoreMessages(transcript.messages)
                 GatewaySessionStore.lastEventId = transcript.eventId
+                GatewaySessionStore.epoch = transcript.epoch ?: GatewaySessionStore.epoch
             }
-            startStream(gateway, sessionId, skipReplay = !restored || transcript.eventId == null)
-        } else {
+            if (snapshot?.started == true) {
+                startStream(gateway, sessionId, skipReplay = !restored || transcript.eventId == null)
+            } else if (restored && transcript.messages.length() == 0) {
+                notice("This session is stopped. Send a prompt to resume it.")
+            }
+        } else if (snapshot?.started == true) {
             startStream(gateway, sessionId)
         }
         refreshCapabilities(gateway, sessionId, announce = false)
+    }
+
+    /** The gateway dropped events for a slow reader; replace the transcript and resume from its cursor. */
+    private fun reloadAfterResync() {
+        val gateway = client ?: return
+        val sessionId = GatewaySessionStore.sessionId ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            val transcript = runCatching { gateway.messages(sessionId) }.getOrNull() ?: return@launch
+            if (GatewaySessionStore.sessionId != sessionId) return@launch
+            restoreMessages(transcript.messages)
+            GatewaySessionStore.lastEventId = transcript.eventId
+            GatewaySessionStore.epoch = transcript.epoch ?: GatewaySessionStore.epoch
+        }
     }
 
     private fun restoreMessages(messages: JSONArray) {
@@ -927,11 +1031,13 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     private fun handleEvent(event: GatewayEvent) {
         val payload = event.payload
         when (payload.optString("type")) {
+            "resync" -> reloadAfterResync()
             "agent_start" -> _state.update { it.copy(streaming = true) }
             "agent_settled" -> {
                 activeAssistantId = null
                 pendingUserEchoes.clear()
-                _state.update { it.copy(streaming = false) }
+                settings.clearPendingSubmit()
+                _state.update { it.copy(streaming = false, stopping = false) }
                 refreshStats()
             }
             "extension_ui_request" -> handleExtensionRequest(payload)
@@ -1275,22 +1381,27 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         return id
     }
 
-    private fun addUserMessage(text: String) {
-        if (text.isBlank()) return
+    /** Returns the new message id, or null when the echo was already present. */
+    private fun addUserMessage(text: String): String? {
+        if (text.isBlank()) return null
+        var added: String? = null
         _state.update { state ->
             val last = state.messages.lastOrNull()
             if (last?.role == ChatRole.User && last.text == text) {
                 state
             } else {
+                val id = UUID.randomUUID().toString()
+                added = id
                 state.copy(
                     messages = state.messages + ChatMessage(
-                        id = UUID.randomUUID().toString(),
+                        id = id,
                         role = ChatRole.User,
                         text = text,
                     ),
                 )
             }
         }
+        return added
     }
 }
 

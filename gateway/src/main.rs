@@ -6,7 +6,7 @@ use std::{
     process::Stdio,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -36,6 +36,8 @@ use uuid::Uuid;
 
 const EVENT_BUFFER: usize = 4_096;
 const BROADCAST_CAPACITY: usize = 2_048;
+const DEFAULT_PAGE: usize = 500;
+const MAX_PAGE: usize = 500;
 const MAX_IMAGES: usize = 4;
 const MAX_IMAGE_EDGE: u32 = 1_568;
 const MAX_IMAGE_BYTES: usize = 1_500_000;
@@ -94,6 +96,12 @@ struct AppState {
     debug_stderr: bool,
     sessions: Arc<RwLock<HashMap<String, Arc<Session>>>>,
     state_file: PathBuf,
+    /// Identifies this gateway process. A client discards a cursor when the epoch changes.
+    epoch: String,
+    /// Idle seconds before a started, unobserved, non-busy Pi process is stopped. 0 disables.
+    idle_secs: u64,
+    /// Serializes state-file writes so a concurrent persist cannot interleave.
+    state_lock: Arc<Mutex<()>>,
 }
 
 struct Session {
@@ -106,6 +114,8 @@ struct Session {
     start: Mutex<()>,
     seq: AtomicU64,
     streaming: AtomicBool,
+    stopping: AtomicBool,
+    subscribers: AtomicUsize,
     last_activity: AtomicU64,
     events: Mutex<VecDeque<WireEvent>>,
     tx: broadcast::Sender<WireEvent>,
@@ -126,7 +136,11 @@ struct SessionInfo {
     id: String,
     name: String,
     cwd: String,
+    /// `stopped`, `idle`, or `running`.
     status: String,
+    started: bool,
+    /// True from prompt acceptance until `agent_settled`.
+    busy: bool,
     created: u64,
 }
 
@@ -147,6 +161,14 @@ struct StoredSession {
 struct EventsQuery {
     #[serde(default = "default_replay")]
     replay: bool,
+}
+
+#[derive(Deserialize)]
+struct PaginationQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    before: Option<usize>,
 }
 
 fn default_replay() -> bool {
@@ -282,11 +304,22 @@ impl Session {
     }
 
     async fn info(&self) -> SessionInfo {
+        let started = self.stdin.lock().await.is_some();
+        let busy = started && self.streaming.load(Ordering::SeqCst);
+        let status = if !started {
+            "stopped"
+        } else if busy {
+            "running"
+        } else {
+            "idle"
+        };
         SessionInfo {
             id: self.id.clone(),
             name: self.name.read().await.clone(),
             cwd: self.cwd.clone(),
-            status: self.status.lock().await.clone(),
+            status: status.to_string(),
+            started,
+            busy,
             created: self.created,
         }
     }
@@ -308,7 +341,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!(
                     "Usage: helldye-gateway [--listen ADDR] [--pi PATH] [--tools LIST]\n\
                      Env: HELLDYE_PI_BIN, HELLDYE_TOOLS, HELLDYE_TOKEN, HELLDYE_TOKEN_FILE,\n\
-                          HELLDYE_WORKSPACES, HELLDYE_DEBUG, HELLDYE_STATE_FILE\n\
+                          HELLDYE_WORKSPACES, HELLDYE_DEBUG, HELLDYE_STATE_FILE, HELLDYE_IDLE_SECS\n\
                      A bearer token is required for every start, including loopback."
                 );
                 return Ok(());
@@ -338,6 +371,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let home = env::var("HOME").unwrap_or_else(|_| ".".into());
             PathBuf::from(home).join(".local/share/helldye/sessions.json")
         });
+    let idle_secs = env::var("HELLDYE_IDLE_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(1_800);
     let (restored, migrated) = load_sessions(&state_file, &workspaces).await;
 
     let state = AppState {
@@ -348,10 +385,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         debug_stderr,
         sessions: Arc::new(RwLock::new(restored)),
         state_file,
+        epoch: Uuid::new_v4().to_string(),
+        idle_secs,
+        state_lock: Arc::new(Mutex::new(())),
     };
     if migrated {
         persist_sessions(&state).await;
     }
+    spawn_idle_reaper(state.clone());
 
     let app = Router::new()
         .route("/health", get(health))
@@ -548,8 +589,10 @@ async fn health() -> &'static str {
     "ok"
 }
 
-async fn info() -> impl IntoResponse {
-    Json(info_payload())
+async fn info(State(state): State<AppState>) -> impl IntoResponse {
+    let mut payload = info_payload();
+    payload["epoch"] = json!(state.epoch);
+    Json(payload)
 }
 
 /// Only versions and capability flags. Never a name, path, environment value, cwd, or count.
@@ -625,6 +668,46 @@ async fn remove_ephemeral(state: &AppState, id: &str) {
     }
 }
 
+/// Reaping stops the Pi process but keeps the session record, so the next prompt resumes it.
+fn should_reap(started: bool, busy: bool, subscribers: usize, idle_secs: u64, limit: u64) -> bool {
+    limit > 0 && started && !busy && subscribers == 0 && idle_secs >= limit
+}
+
+fn spawn_idle_reaper(state: AppState) {
+    if state.idle_secs == 0 {
+        return;
+    }
+    let interval = (state.idle_secs / 2).clamp(15, 300);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(interval)).await;
+            let sessions: Vec<Arc<Session>> = state
+                .sessions
+                .read()
+                .await
+                .values()
+                .filter(|session| !session.ephemeral)
+                .cloned()
+                .collect();
+            let now = now_epoch();
+            for session in sessions {
+                let started = session.stdin.lock().await.is_some();
+                let idle = now.saturating_sub(session.last_activity.load(Ordering::SeqCst));
+                if should_reap(
+                    started,
+                    session.streaming.load(Ordering::SeqCst),
+                    session.subscribers.load(Ordering::SeqCst),
+                    idle,
+                    state.idle_secs,
+                ) {
+                    session.stdin.lock().await.take();
+                    *session.status.lock().await = "stopped".into();
+                }
+            }
+        }
+    });
+}
+
 async fn get_session(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -633,10 +716,11 @@ async fn get_session(
     Ok(Json(session.info().await))
 }
 
+/// Removes the gateway record only. The Pi transcript stays on the host; the response says so.
 async fn delete_session(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<Json<Value>, StatusCode> {
     let session = state
         .sessions
         .write()
@@ -648,7 +732,7 @@ async fn delete_session(
     if !ephemeral {
         persist_sessions(&state).await;
     }
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(json!({ "removed": true, "transcriptKept": true })))
 }
 
 async fn prompt(
@@ -711,6 +795,7 @@ async fn abort(
         .send(json!({ "type": "abort" }))
         .await
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    session.stopping.store(true, Ordering::SeqCst);
     Ok(Json(json!({ "accepted": true })))
 }
 
@@ -782,16 +867,36 @@ async fn session_commands(
     command_data(response).map(Json)
 }
 
+/// Reads gateway state without spawning Pi. `get_state` is queried only when Pi is already running.
 async fn session_state(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let session = lookup_started(&state, &id).await?;
-    let response = session
-        .request(json!({ "type": "get_state" }), Duration::from_secs(10))
-        .await
-        .map_err(bad_gateway)?;
-    command_data(response).map(Json)
+    let session = lookup_owned(&state, &id).await?;
+    let info = session.info().await;
+    let mut payload = json!({
+        "started": info.started,
+        "busy": info.busy,
+        "stopping": session.stopping.load(Ordering::SeqCst),
+        "status": info.status,
+        "lastEventId": session.seq.load(Ordering::SeqCst).to_string(),
+        "epoch": state.epoch,
+        "created": info.created,
+    });
+    if info.started {
+        if let Ok(response) = session
+            .request(json!({ "type": "get_state" }), Duration::from_secs(10))
+            .await
+        {
+            if let Ok(Value::Object(pi)) = command_data(response) {
+                let object = payload.as_object_mut().expect("payload is an object");
+                for (key, value) in pi {
+                    object.entry(key).or_insert(value);
+                }
+            }
+        }
+    }
+    Ok(Json(payload))
 }
 
 async fn set_session_model(
@@ -880,6 +985,40 @@ async fn extension_ui_response(
     Ok(Json(json!({ "accepted": true })))
 }
 
+/// Keeps the idle reaper from stopping Pi while a client is attached.
+struct SubscriberGuard(Arc<Session>);
+
+impl Drop for SubscriberGuard {
+    fn drop(&mut self) {
+        self.0.subscribers.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Synthetic event with no cursor id: the client must fetch `/messages` and resume from its eventId.
+fn resync_event(last_event_id: u64) -> WireEvent {
+    WireEvent {
+        id: 0,
+        kind: "resync".into(),
+        data: json!({
+            "type": "resync",
+            "reason": "lagged",
+            "lastEventId": last_event_id.to_string(),
+        })
+        .to_string(),
+    }
+}
+
+/// A synthetic event (id 0) carries no cursor, so the client does not advance its last event id.
+fn sse_event(event: WireEvent) -> Result<SseEvent, Infallible> {
+    let out = SseEvent::default().event(event.kind).data(event.data);
+    let out = if event.id == 0 {
+        out
+    } else {
+        out.id(event.id.to_string())
+    };
+    Ok(out)
+}
+
 async fn session_events(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -887,9 +1026,22 @@ async fn session_events(
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, StatusCode> {
     let session = lookup(&state, &id).await?;
-    ensure_started(&state, &session)
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let started = session.stdin.lock().await.is_some();
+    let epoch = state.epoch.clone();
+    let (tx, rx) = mpsc::channel(256);
+
+    if !started {
+        let event = WireEvent {
+            id: 0,
+            kind: "not_started".into(),
+            data: json!({ "type": "not_started", "epoch": epoch }).to_string(),
+        };
+        let _ = tx.send(event).await;
+        drop(tx);
+        return Ok(Sse::new(ReceiverStream::new(rx).map(sse_event))
+            .keep_alive(KeepAlive::new().interval(Duration::from_secs(15))));
+    }
+
     let mut last = if query.replay {
         headers
             .get("last-event-id")
@@ -903,9 +1055,20 @@ async fn session_events(
         last = 0;
     }
 
-    let (tx, rx) = mpsc::channel(256);
+    session.subscribers.fetch_add(1, Ordering::SeqCst);
+    let guard = SubscriberGuard(session.clone());
     tokio::spawn(async move {
+        let _guard = guard;
         let mut subscriber = session.tx.subscribe();
+        let epoch = WireEvent {
+            id: 0,
+            kind: "gateway_epoch".into(),
+            data: json!({ "type": "gateway_epoch", "epoch": epoch }).to_string(),
+        };
+        if tx.send(epoch).await.is_err() {
+            return;
+        }
+
         let mut next = last + 1;
         let backlog = session.events.lock().await.clone();
         for event in backlog {
@@ -928,35 +1091,69 @@ async fn session_events(
                     }
                     next = event.id + 1;
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    // The broadcast ring dropped events. Tell the client to resync from /messages
+                    // instead of continuing with a silent gap.
+                    let _ = tx.send(resync_event(next.saturating_sub(1))).await;
+                    break;
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     });
 
-    let stream = ReceiverStream::new(rx).map(|event| {
-        Ok(SseEvent::default()
-            .id(event.id.to_string())
-            .event(event.kind)
-            .data(event.data))
-    });
-    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+    Ok(Sse::new(ReceiverStream::new(rx).map(sse_event))
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 
+/// Reads the transcript without spawning Pi. A stopped session returns `started=false`; the Phase 5
+/// host-transcript reader is the eventual source of its messages.
 async fn session_messages(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
+    Query(page): Query<PaginationQuery>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let session = lookup_started(&state, &id).await?;
+    let session = lookup_owned(&state, &id).await?;
+    let epoch = state.epoch.clone();
+    if session.stdin.lock().await.is_none() {
+        return Ok(Json(json!({
+            "started": false,
+            "messages": [],
+            "total": 0,
+            "hasMore": false,
+            "eventId": session.seq.load(Ordering::SeqCst).to_string(),
+            "epoch": epoch,
+        })));
+    }
     let (response, event_id) = session
         .request_with_cursor(json!({ "type": "get_messages" }), Duration::from_secs(15))
         .await
         .map_err(bad_gateway)?;
     let mut data = command_data(response)?;
+    let limit = page.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
+    let (total, has_more) = paginate_messages(&mut data, limit, page.before);
     if let Some(object) = data.as_object_mut() {
-        object.insert("eventId".to_string(), json!(event_id));
+        object.insert("started".to_string(), json!(true));
+        object.insert("total".to_string(), json!(total));
+        object.insert("hasMore".to_string(), json!(has_more));
+        object.insert("eventId".to_string(), json!(event_id.to_string()));
+        object.insert("epoch".to_string(), json!(epoch));
     }
     Ok(Json(data))
+}
+
+/// Slices the newest page out of Pi's full message list. `before` is an exclusive end index, so the
+/// app walks backwards with `before=<start of the previous page>`.
+fn paginate_messages(data: &mut Value, limit: usize, before: Option<usize>) -> (usize, bool) {
+    let Some(messages) = data.get_mut("messages").and_then(Value::as_array_mut) else {
+        return (0, false);
+    };
+    let total = messages.len();
+    let end = before.unwrap_or(total).min(total);
+    let start = end.saturating_sub(limit);
+    let page: Vec<Value> = messages[start..end].to_vec();
+    *messages = page;
+    (total, start > 0)
 }
 
 async fn lookup_owned(state: &AppState, id: &str) -> Result<Arc<Session>, (StatusCode, String)> {
@@ -1026,6 +1223,8 @@ fn new_session(
         start: Mutex::new(()),
         seq: AtomicU64::new(0),
         streaming: AtomicBool::new(false),
+        stopping: AtomicBool::new(false),
+        subscribers: AtomicUsize::new(0),
         last_activity: AtomicU64::new(now_epoch()),
         events: Mutex::new(VecDeque::new()),
         tx,
@@ -1080,6 +1279,8 @@ async fn ensure_started(state: &AppState, session: &Arc<Session>) -> Result<(), 
     tokio::spawn(async move {
         let _ = child.wait().await;
         *watcher.stdin.lock().await = None;
+        watcher.streaming.store(false, Ordering::SeqCst);
+        watcher.stopping.store(false, Ordering::SeqCst);
         *watcher.status.lock().await = "stopped".into();
         watcher
             .publish(
@@ -1179,10 +1380,29 @@ async fn persist_sessions(state: &AppState) {
     let Ok(bytes) = serde_json::to_vec_pretty(&stored) else {
         return;
     };
-    if let Some(dir) = state.state_file.parent() {
-        let _ = tokio::fs::create_dir_all(dir).await;
+    let _guard = state.state_lock.lock().await;
+    let state_file = state.state_file.clone();
+    let _ = tokio::task::spawn_blocking(move || write_state_atomically(&state_file, &bytes)).await;
+}
+
+/// Write to a sibling temp file, fsync it, rename, then fsync the directory. A crash leaves either
+/// the old file or the new one, never a truncated `sessions.json`.
+fn write_state_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
     }
-    let _ = tokio::fs::write(&state.state_file, bytes).await;
+    let temp = path.with_extension("json.tmp");
+    {
+        let mut file = std::fs::File::create(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&temp, path)?;
+    if let Some(dir) = path.parent() {
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(())
 }
 
 async fn read_stdout(session: Arc<Session>, stdout: tokio::process::ChildStdout, state: AppState) {
@@ -1210,7 +1430,10 @@ async fn read_stdout(session: Arc<Session>, stdout: tokio::process::ChildStdout,
 
         match kind.as_str() {
             "agent_start" => session.streaming.store(true, Ordering::SeqCst),
-            "agent_settled" => session.streaming.store(false, Ordering::SeqCst),
+            "agent_settled" => {
+                session.streaming.store(false, Ordering::SeqCst);
+                session.stopping.store(false, Ordering::SeqCst);
+            }
             _ => {}
         }
         session.publish(kind.clone(), line).await;
@@ -1489,8 +1712,9 @@ mod tests {
     use super::{
         ContextFile, ImageBody, PromptContext, constant_time_eq, decode_base64,
         ensure_token_file_outside_workspaces, info_payload, jpeg_dimensions, migrated_name,
-        neutral_name, pi_command, png_dimensions, read_token_file, redact_stderr_line,
-        resolve_workspace, validate_images,
+        neutral_name, paginate_messages, pi_command, png_dimensions, read_token_file,
+        redact_stderr_line, resolve_workspace, resync_event, should_reap, validate_images,
+        write_state_atomically,
     };
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
@@ -1656,6 +1880,9 @@ mod tests {
             debug_stderr: false,
             sessions: std::sync::Arc::new(tokio::sync::RwLock::new(sessions)),
             state_file: state_file.clone(),
+            epoch: "test-epoch".into(),
+            idle_secs: 0,
+            state_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         };
         super::persist_sessions(&state).await;
         let stored: Vec<super::StoredSession> =
@@ -1934,6 +2161,9 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             state_file: state_file.clone(),
+            epoch: "test-epoch".into(),
+            idle_secs: 0,
+            state_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         };
 
         let Json(normal) = super::create_session(
@@ -1995,6 +2225,130 @@ mod tests {
         assert!(!arguments.contains("--session-id"));
         let stored = fs::read_to_string(&state_file).unwrap();
         assert!(!stored.contains(&ephemeral.id));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn message_pagination_returns_the_newest_page_first() {
+        let full = || {
+            serde_json::json!({
+                "messages": (0..10).map(|index| serde_json::json!({ "index": index })).collect::<Vec<_>>(),
+            })
+        };
+        let mut data = full();
+        let (total, more) = paginate_messages(&mut data, 4, None);
+        assert_eq!(total, 10);
+        assert!(more);
+        assert_eq!(data["messages"].as_array().unwrap().len(), 4);
+        assert_eq!(data["messages"][0]["index"], 6);
+
+        let mut data = full();
+        let (total, more) = paginate_messages(&mut data, 4, Some(6));
+        assert_eq!(total, 10);
+        assert!(more);
+        assert_eq!(data["messages"][0]["index"], 2);
+
+        let mut small = serde_json::json!({ "messages": [1, 2] });
+        assert_eq!(paginate_messages(&mut small, 10, None), (2, false));
+        assert_eq!(small["messages"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn reaping_requires_idle_stopped_stream_and_no_subscribers() {
+        assert!(should_reap(true, false, 0, 1_800, 1_800));
+        assert!(!should_reap(false, false, 0, 9_999, 1_800));
+        assert!(!should_reap(true, true, 0, 9_999, 1_800));
+        assert!(!should_reap(true, false, 1, 9_999, 1_800));
+        assert!(!should_reap(true, false, 0, 1_799, 1_800));
+        assert!(!should_reap(true, false, 0, 9_999, 0));
+    }
+
+    #[test]
+    fn lagged_stream_emits_a_cursorless_resync() {
+        let event = resync_event(41);
+        let data: serde_json::Value = serde_json::from_str(&event.data).unwrap();
+        assert_eq!(event.id, 0);
+        assert_eq!(event.kind, "resync");
+        assert_eq!(data["reason"], "lagged");
+        assert_eq!(data["lastEventId"], "41");
+    }
+
+    #[tokio::test]
+    async fn state_file_is_replaced_atomically() {
+        let dir = temp_dir("atomic-state");
+        let path = dir.join("sessions.json");
+        write_state_atomically(&path, b"[]").unwrap();
+        write_state_atomically(&path, b"[{\"id\":\"one\"}]").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "[{\"id\":\"one\"}]");
+        assert!(!dir.join("sessions.json.tmp").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn reading_state_does_not_spawn_pi() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = FAKE_PI_LOCK.lock().await;
+        let dir = temp_dir("state-no-spawn");
+        let workspace = dir.join("ws");
+        fs::create_dir_all(&workspace).unwrap();
+        let marker = dir.join("spawned");
+        let script = dir.join("pi");
+        fs::write(&script, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+        fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let state_file = dir.join("sessions.json");
+        let roots = vec![workspace.canonicalize().unwrap()];
+        let session = super::new_session(
+            "12345678-aaaa".into(),
+            "Session 12345678".into(),
+            workspace.canonicalize().unwrap(),
+            super::now_epoch(),
+            false,
+            false,
+        );
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert(session.id.clone(), session);
+        let state = super::AppState {
+            pi_bin: script.to_string_lossy().into_owned(),
+            tools: "read".into(),
+            token: "secret".into(),
+            workspaces: std::sync::Arc::new(roots),
+            debug_stderr: false,
+            sessions: std::sync::Arc::new(tokio::sync::RwLock::new(sessions)),
+            state_file,
+            epoch: "epoch-a".into(),
+            idle_secs: 0,
+            state_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        };
+
+        let Json(value) =
+            super::session_state(State(state.clone()), AxumPath("12345678-aaaa".into()))
+                .await
+                .unwrap();
+        assert_eq!(value["started"], false);
+        assert_eq!(value["busy"], false);
+        assert_eq!(value["status"], "stopped");
+        assert_eq!(value["epoch"], "epoch-a");
+        assert!(!marker.exists(), "reading state must not spawn Pi");
+
+        let Json(messages) = super::session_messages(
+            State(state.clone()),
+            AxumPath("12345678-aaaa".into()),
+            axum::extract::Query(super::PaginationQuery {
+                limit: None,
+                before: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(messages["started"], false);
+        assert_eq!(messages["messages"].as_array().unwrap().len(), 0);
+        assert!(!marker.exists(), "reading messages must not spawn Pi");
+
+        let Json(deleted) = super::delete_session(State(state), AxumPath("12345678-aaaa".into()))
+            .await
+            .unwrap();
+        assert_eq!(deleted["removed"], true);
+        assert_eq!(deleted["transcriptKept"], true);
         let _ = fs::remove_dir_all(&dir);
     }
 }
