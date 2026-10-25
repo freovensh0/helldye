@@ -62,6 +62,8 @@ wait_ready() {
 start() {
     [ -x "$DIR/helldye-gateway" ] || die "not installed; run the HELLDYE installer first"
     [ -s "$TOKEN_FILE" ] || die "missing $TOKEN_FILE; run the HELLDYE installer first"
+    [ "$(stat -c '%a' "$TOKEN_FILE" 2>/dev/null || true)" = "600" ] ||
+        die "$TOKEN_FILE must be mode 0600; run: chmod 600 $TOKEN_FILE"
 
     if is_running; then
         echo "hellgate already running (pid $(pid)) on http://$LISTEN"
@@ -71,11 +73,17 @@ start() {
     local pi="${PI_BOLT:-$(command -v pi-bolt || true)}"
     [ -n "$pi" ] || die "pi-bolt not found; install Pi-Bolt or set PI_BOLT=/path/to/pi-bolt"
 
+    if [ -z "${HELLDYE_WORKSPACES:-}" ]; then
+        HELLDYE_WORKSPACES="$HOME/helldye-workspace"
+        mkdir -p "$HELLDYE_WORKSPACES"
+    fi
+    export HELLDYE_WORKSPACES
+
     if [ -s "$TOOLS_FILE" ]; then
         export HELLDYE_TOOLS="$(cat "$TOOLS_FILE")"
     fi
 
-    HELLDYE_TOKEN="$(cat "$TOKEN_FILE")" nohup "$DIR/helldye-gateway" \
+    HELLDYE_TOKEN_FILE="$TOKEN_FILE" nohup "$DIR/helldye-gateway" \
         --listen "$LISTEN" --pi "$pi" >>"$LOG_FILE" 2>&1 &
     echo $! >"$PID_FILE"
 

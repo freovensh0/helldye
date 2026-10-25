@@ -16,16 +16,19 @@ the session list, and the event stream.
 - HTTP/1.1 with JSON bodies and `text/event-stream` for events. No WebSocket, no gRPC, no CORS headers.
 - TLS is expected in front of the gateway (Tailscale Serve or a reverse proxy). The gateway itself
   serves plain HTTP.
-- Every route requires `Authorization: Bearer <token>` when a token is configured, including loopback.
-  `GET /health` is always unauthenticated.
-- The token comes from `HELLDYE_TOKEN`, optionally overridden by `--token`. If neither is set, auth is
-  disabled.
+- Every `/v1` route requires `Authorization: Bearer <token>`, including loopback. `GET /health` is
+  the only unauthenticated route.
+- The token comes from `HELLDYE_TOKEN` or `HELLDYE_TOKEN_FILE`. There is no `--token` flag. A token
+  file must be mode `0600` on Unix; any other mode aborts startup. The gateway refuses to start
+  without a token at all.
 - Missing or wrong token: `401` with an empty body. There is no `WWW-Authenticate` header.
+  Comparison is constant-time.
 - Request bodies are limited to 12 MiB. Base64 images count against that limit.
 - Unknown paths: `404`. A known path with the wrong method: `405`.
 - Malformed JSON: axum's `Json` rejection (`400` or `422`, plain-text body).
 
-A token is optional today. Phase 1 makes it mandatory for every `/v1` route.
+The gateway also refuses to start without `HELLDYE_WORKSPACES` (see §7). The token is never logged,
+never a command-line argument, and never enters the Pi child environment.
 
 ## 2. Routes
 
@@ -34,9 +37,9 @@ A token is optional today. Phase 1 makes it mandatory for every `/v1` route.
 | Method | Path | Request | Success response |
 |---|---|---|---|
 | `GET` | `/health` | — | `200`, body `ok` |
-| `GET` | `/v1/info` | — | `200` `{name, version, piBin, sessions}` |
+| `GET` | `/v1/info` | — | `200` `{version, piVersion, capabilities}` |
 | `GET` | `/v1/sessions` | — | `200`, array of `SessionInfo`, newest `created` first |
-| `POST` | `/v1/sessions` | `{cwd?, name?}` | `200` `SessionInfo` |
+| `POST` | `/v1/sessions` | `{cwd?}` | `200` `SessionInfo` |
 | `GET` | `/v1/sessions/{id}` | — | `200` `SessionInfo` |
 | `DELETE` | `/v1/sessions/{id}` | — | `204`, empty body |
 | `GET` | `/v1/sessions/{id}/events` | `?replay=true|false`, `Last-Event-ID` | `200` SSE |
@@ -57,20 +60,42 @@ A token is optional today. Phase 1 makes it mandatory for every `/v1` route.
 ### 2.1 Session shape
 
 ```json
-{ "id": "uuid", "name": "string", "cwd": "/absolute/path", "status": "running|stopped", "created": 1760000000 }
+{ "id": "uuid", "name": "Session 4F2A", "cwd": "/absolute/path", "status": "running|stopped", "created": 1760000000 }
 ```
 
 - `status` is process state, not turn state. `running` means a Pi child is attached; `stopped` means it
   exited or was never started.
-- `name` defaults to the first 8 characters of the id. It is never derived from a prompt.
+- `name` is generated as `Session <first 8 id characters, uppercase>`. It is never derived from a
+  prompt. A rename is the only way to set a custom name, and it records that the name is explicit.
+- A state file from an older gateway has no explicit-name marker, so every stored name is replaced
+  with the neutral form on load; the old prompt text is never displayed or passed to Pi.
 - `created` is Unix seconds.
+
+### 2.1.1 Info
+
+`GET /v1/info` requires auth and returns only:
+
+```json
+{
+  "version": "0.1.0",
+  "piVersion": null,
+  "capabilities": {
+    "sessions": true, "images": true, "structuredContext": true, "workspaceAllowlist": true,
+    "ephemeralSessions": false, "import": false, "fork": false, "export": false
+  }
+}
+```
+
+It never exposes a binary path, workspace path, cwd, or environment value. `piVersion` is `null`
+until capability negotiation lands.
 
 ### 2.2 Create
 
-- `cwd` is canonicalized and must be an existing directory. Missing `cwd` uses the gateway process's
-  current directory. Invalid path: `400 invalid cwd: ...`; not a directory: `400 cwd is not a directory`.
-- No workspace allowlist is enforced. Any directory the gateway user can enter is accepted. Phase 1
-  adds the allowlist.
+- `cwd` must be an absolute path inside one of the `HELLDYE_WORKSPACES` roots. A missing or empty
+  `cwd` uses the first allowed root, never the gateway process directory.
+- `..`, relative paths, paths outside every root, and paths whose symlink target escapes the root are
+  rejected with `400`.
+- `name` is not accepted on create; use `POST /name` to rename.
 - Creating a session does not start Pi and does not run a turn.
 
 ### 2.3 Pi start behavior
@@ -85,15 +110,20 @@ Pi.
 ```json
 {
   "message": "What is wrong with this layout?",
-  "context": "<file name=\"notes.md\">...</file>",
+  "context": {
+    "files": [{ "name": "notes.md", "content": "..." }]
+  },
   "images": [{ "data": "<base64>", "mimeType": "image/jpeg" }]
 }
 ```
 
-- `context` is optional. It is trimmed and prepended to `message` as `context + "\n\n" + message`.
-  The gateway does not escape or reinterpret it.
-- `images` carries zero or more images. The app sends at most one, the staged screenshot. The gateway
-  forwards `data` and `mimeType` to Pi and does not decode, log, or write the bytes.
+- `context` is optional structured data. The gateway serializes it as JSON inside a labeled
+  `BEGIN CONTEXT DATA` / `END CONTEXT DATA` block, prepends a rule that the block is untrusted data
+  and not instructions, and then appends `message`. The client must not pre-wrap content in
+  `<file>` tags. JSON escaping keeps `</file>`, fake system messages, and URLs inside the data block.
+- `images` carries zero to four images. Each must be JPEG or PNG, at most 1,568 px on the long edge,
+  at most 1.5 MB decoded, and at most 6 MB decoded in total. The gateway validates MIME type, base64,
+  magic bytes, dimensions, and size before forwarding.
 - `message` may be empty only when at least one image is present; otherwise `400 message is empty`.
 - While a turn is streaming, the gateway adds `streamingBehavior: "steer"` to the Pi command.
 - The response means "accepted by the gateway for delivery to Pi", not "turn finished". Output arrives on
@@ -113,8 +143,9 @@ session open, not only after a restart.
 
 ### 2.6 Rename
 
-`name` is trimmed; empty is `400 name is empty`. If Pi is running, the gateway also sends
-`set_session_name` and returns `502` if Pi rejects it. The record is persisted after a successful rename.
+`name` is trimmed; empty is `400 name is empty`. This is the only route that changes a name and it
+marks the name as explicit. If Pi is running, the gateway also sends `set_session_name` and returns
+`502` if Pi rejects it. The record is persisted after a successful rename.
 
 ### 2.7 Session removal
 
@@ -179,13 +210,13 @@ Error bodies are plain text, not JSON. Empty bodies are possible.
 
 | Status | When |
 |---|---|
-| `400` | Invalid `cwd`, `cwd` not a directory, empty `message` with no image, empty `name`, malformed JSON fields. |
-| `401` | Token configured and missing or wrong. |
+| `400` | Invalid `cwd`, `cwd` outside the workspace allowlist, `cwd` with `..` or a relative path, empty `message` with no image, empty `name`, malformed JSON fields. |
+| `401` | Missing or wrong token. |
 | `404` | Session id not found, unknown path. |
 | `405` | Known path, wrong method. |
-| `413` | Request body over 12 MiB. |
+| `413` | Request body over 12 MiB, more than four images, an image over 1.5 MB or 6 MB total, or an image whose long edge exceeds 1,568 px. |
+| `415` | Unsupported image MIME type, invalid base64, or bytes that do not match the declared image type. |
 | `422` | JSON body parsed but a required field has the wrong type. |
-| `500` | Gateway could not resolve its own current directory during create. |
 | `502` | Pi failed to start, stdin is closed, a Pi command failed, or a Pi command timed out (10–15 s). |
 
 The app surfaces `HTTP <code>: <body>`; do not parse the body for branching.
@@ -194,8 +225,10 @@ The app surfaces `HTTP <code>: <body>`; do not parse the body for branching.
 
 - The gateway writes no prompt, image, or transcript to its own disk path. Pi owns transcripts.
 - `sessions.json` (`HELLDYE_STATE_FILE` or `~/.local/share/helldye/sessions.json`) stores only
-  `id`, `name`, `cwd`, and `created`. It is rewritten in full on create, rename, and delete; the write
-  is not atomic.
+  `id`, `name`, `cwd`, `created`, and whether the name is explicit. It is rewritten in full on create,
+  rename, delete, and state migration; the write is not atomic.
+- On load, a record whose `cwd` is outside the current workspace allowlist is dropped, and a record
+  without an explicit-name marker gets the neutral `Session <short id>` name.
 - The event ring is memory only and dies with the process.
 - Pi persists each session under `--session-id` in Pi's session storage on the host. Prompts and images
   are part of that transcript.
@@ -212,13 +245,21 @@ a screenshot sent through this gateway lands in the selected session's transcrip
 
 ## 7. Workspace and tools
 
-- `cwd` is the only workspace control. It is canonicalized per create and fixed for the session's life.
-  There is no allowlist, no per-session worktree, and no path check beyond "is a directory".
+- `HELLDYE_WORKSPACES` is a required colon-separated allowlist of absolute directories. Each root is
+  canonicalized at startup; a missing or non-directory root aborts startup.
+- A session `cwd` is canonicalized per create and fixed for the session's life. It must be inside a
+  root; `..`, relative paths, absolute paths outside every root, and symlink escapes are rejected.
+  The default is the first allowed root, not the gateway process directory.
 - The tool allowlist comes from `--tools` or `HELLDYE_TOOLS`; the default is `read,grep,find,ls`.
   `*` enables every tool, including extension tools. It is applied when the Pi child starts, so a
-  change requires restarting the gateway or the session.
-- The gateway sets `current_dir` to the session `cwd` and passes no extra environment allowlist. Pi
-  inherits the gateway environment today. Phase 1 changes that.
+  change requires restarting the gateway or the session. Actions remain off until explicitly enabled.
+- Pi is spawned with `current_dir` set to the session `cwd` and an empty environment plus an explicit
+  allowlist (`PATH`, `HOME`, locale, timezone, XDG directories, provider API keys). `HELLDYE_TOKEN`,
+  `HELLDYE_TOKEN_FILE`, CI variables, and every other inherited value are absent from the child.
+- Same-user isolation is not a sandbox: Pi can still read files the gateway user can read. Use a
+  separate host user, container, or VM for strong isolation.
+- Pi stderr is drained but not logged unless `HELLDYE_DEBUG=1`. Debug lines are bounded and prompt-like
+  or image payloads are dropped/redacted. No prompt or image body is logged at any level.
 
 ## 8. One writer
 
