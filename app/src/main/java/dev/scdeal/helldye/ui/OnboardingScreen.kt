@@ -60,7 +60,7 @@ fun OnboardingScreen(
         )
         Spacer(Modifier.height(HelldyeDimens.Md))
         Text(
-            text = "Screen context is read only when you ask. Nothing leaves the device unless you choose a backend.",
+            text = "Screen context is one screenshot. It leaves the device only when you send it.",
             style = MaterialTheme.typography.bodyMedium,
             color = HelldyeColors.TextSecondary,
         )
