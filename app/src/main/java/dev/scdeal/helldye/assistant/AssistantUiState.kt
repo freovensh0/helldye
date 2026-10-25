@@ -3,6 +3,7 @@ package dev.scdeal.helldye.assistant
 import dev.scdeal.helldye.gateway.GatewayCommand
 import dev.scdeal.helldye.gateway.GatewayDiff
 import dev.scdeal.helldye.gateway.GatewayModel
+import dev.scdeal.helldye.gateway.GatewayTree
 import dev.scdeal.helldye.gateway.GatewaySession
 import dev.scdeal.helldye.gateway.GatewayStats
 
@@ -78,6 +79,12 @@ data class AssistantUiState(
     val diffLoading: Boolean = false,
     val diff: GatewayDiff? = null,
     val diffError: String? = null,
+    val treeOpen: Boolean = false,
+    val treeLoading: Boolean = false,
+    val tree: GatewayTree? = null,
+    val treeError: String? = null,
+    /** Set after a successful export fetch; the screen launches SAF and then calls consumeExport. */
+    val exportHtml: String? = null,
     val sessions: List<GatewaySession> = emptyList(),
     val sessionsOpen: Boolean = false,
     val sessionsLoading: Boolean = false,

@@ -179,6 +179,11 @@ image MIME type, base64, dimensions, and size before forwarding the bytes.
 - `POST /v1/sessions/import` explicitly scans `HELLDYE_PI_SESSION_DIR` for `*.jsonl` session files and
   adds neutral `ON HOST` records. It never starts Pi and never returns transcript content. Existing
   ids are skipped; remove-then-import is the only way to bring one back.
+- `/tree` returns a flat, indented `get_tree` view (no message bodies) and `/export` streams Pi's
+  `export_html` (temp file deleted after the response). Fork/clone stay disabled until the gateway has a
+  record model for Pi's post-fork session identity.
+- A stopped session serves its transcript from the Pi JSONL file under `HELLDYE_PI_SESSION_DIR`
+  (active leaf only) without starting Pi.
 - Coding surface: `/diff` returns the workspace diff (capped) plus a per-file summary; `/file` peeks
   UTF-8 text inside the workspace; `/worktrees` lists and creates git worktrees with fixed argv and an
   allowlisted destination. There is no phone-side delete, editor, commit, or push.

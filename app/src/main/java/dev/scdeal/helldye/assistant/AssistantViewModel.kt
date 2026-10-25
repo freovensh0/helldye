@@ -721,6 +721,45 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         _state.update { it.copy(diffOpen = false) }
     }
 
+    fun openTree() {
+        val gateway = client ?: return
+        val sessionId = GatewaySessionStore.sessionId ?: return
+        _state.update { it.copy(treeOpen = true, treeLoading = true, treeError = null) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching { gateway.tree(sessionId) }
+            if (GatewaySessionStore.sessionId != sessionId) return@launch
+            _state.update {
+                it.copy(
+                    treeLoading = false,
+                    tree = result.getOrNull() ?: it.tree,
+                    treeError = result.exceptionOrNull()?.message,
+                )
+            }
+        }
+    }
+
+    fun closeTree() {
+        _state.update { it.copy(treeOpen = false) }
+    }
+
+    fun exportHtml() {
+        val gateway = client ?: return
+        val sessionId = GatewaySessionStore.sessionId ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { gateway.exportHtml(sessionId) }
+                .onSuccess { html -> _state.update { it.copy(exportHtml = html) } }
+                .onFailure { error ->
+                    _state.update {
+                        it.copy(error = error.message ?: "Could not export the session.")
+                    }
+                }
+        }
+    }
+
+    fun consumeExport() {
+        _state.update { it.copy(exportHtml = null) }
+    }
+
     fun importSessions() {
         val config = settings.load()
         if (config.url.isBlank()) {

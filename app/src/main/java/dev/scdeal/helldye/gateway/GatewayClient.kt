@@ -83,6 +83,20 @@ data class GatewayDiffFile(
     val untracked: Boolean,
 )
 
+data class GatewayTreeNode(
+    val id: String,
+    val type: String,
+    val role: String?,
+    val depth: Int,
+    val label: String?,
+    val leaf: Boolean,
+)
+
+data class GatewayTree(
+    val nodes: List<GatewayTreeNode>,
+    val leafId: String?,
+)
+
 data class GatewayDiff(
     val files: List<GatewayDiffFile>,
     val text: String,
@@ -199,6 +213,31 @@ class GatewayClient(private val config: GatewayConfig) {
             truncated = response.optBoolean("truncated"),
         )
     }
+
+    fun tree(sessionId: String): GatewayTree {
+        val response = request("GET", "/sessions/$sessionId/tree")
+        val array = response.optJSONArray("nodes") ?: JSONArray()
+        return GatewayTree(
+            nodes = buildList {
+                for (index in 0 until array.length()) {
+                    val node = array.optJSONObject(index) ?: continue
+                    add(
+                        GatewayTreeNode(
+                            id = node.optString("id"),
+                            type = node.optString("type"),
+                            role = node.optString("role").takeIf { it.isNotBlank() },
+                            depth = node.optInt("depth"),
+                            label = node.optString("label").takeIf { it.isNotBlank() },
+                            leaf = node.optBoolean("leaf"),
+                        ),
+                    )
+                }
+            },
+            leafId = response.optString("leafId").takeIf { it.isNotBlank() },
+        )
+    }
+
+    fun exportHtml(sessionId: String): String = requestText("GET", "/sessions/$sessionId/export")
 
     fun setAllowEdits(sessionId: String, enabled: Boolean) {
         request(
