@@ -1937,19 +1937,21 @@ fn acquire_writer_lock(dir: &Path) -> Result<std::os::unix::net::UnixListener, S
     std::fs::create_dir_all(dir)
         .map_err(|error| format!("cannot create the state directory: {error}"))?;
     let path = dir.join("gateway.lock");
-    match UnixListener::bind(&path) {
-        Ok(listener) => Ok(listener),
-        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
-            if UnixStream::connect(&path).is_ok() {
-                Err("another gateway owns this state directory".to_string())
-            } else {
+    for _ in 0..3 {
+        match UnixListener::bind(&path) {
+            Ok(listener) => return Ok(listener),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                if UnixStream::connect(&path).is_ok() {
+                    return Err("another gateway owns this state directory".to_string());
+                }
+                // A closed listener can leave a stale socket path behind for a moment.
                 let _ = std::fs::remove_file(&path);
-                UnixListener::bind(&path)
-                    .map_err(|error| format!("cannot acquire the gateway lock: {error}"))
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
+            Err(error) => return Err(format!("cannot acquire the gateway lock: {error}")),
         }
-        Err(error) => Err(format!("cannot acquire the gateway lock: {error}")),
     }
+    UnixListener::bind(&path).map_err(|error| format!("cannot acquire the gateway lock: {error}"))
 }
 
 fn now_epoch() -> u64 {
@@ -3294,7 +3296,15 @@ mod tests {
         let first = acquire_writer_lock(&dir).expect("first lock");
         assert!(acquire_writer_lock(&dir).is_err());
         drop(first);
-        assert!(acquire_writer_lock(&dir).is_ok());
+        let mut reacquired = false;
+        for _ in 0..10 {
+            if acquire_writer_lock(&dir).is_ok() {
+                reacquired = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(reacquired);
         let _ = fs::remove_dir_all(&dir);
     }
 }
