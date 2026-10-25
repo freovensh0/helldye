@@ -114,6 +114,22 @@ The phone confirmation is two-step: the session row reveals `DELETE` and `KEEP`.
 retention today; Phase 4 (R-04) renames the action to remove-from-list and states that the transcript
 stays on the host.
 
+## Session removal and retention
+
+Pi owns every transcript. The gateway keeps only a session record (`sessions.json`) and an in-memory
+event ring; it does not write prompts or images to its own storage.
+
+- **Remove from list** (`DELETE /v1/sessions/{id}`): removes the gateway record, persists the list, and
+  closes Pi's stdin so the process exits. This is the only removal the phone can do. It does not delete
+  the Pi transcript.
+- **Purge on host** (manual): stop the gateway and delete the Pi session file for that id from Pi's
+  session storage. There is no gateway route and no phone action for this; the app cannot reach the
+  host's Pi session files.
+
+The phone confirmation is two-step: the session row reveals `DELETE` and `KEEP`. It does not mention
+retention today; Phase 4 (R-04) renames the action to remove-from-list and states that the transcript
+stays on the host.
+
 ## API
 
 All `/v1` routes require `Authorization: Bearer <token>`, including loopback. `/health` is the only

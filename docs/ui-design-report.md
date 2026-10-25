@@ -20,6 +20,10 @@ settings list. They are regenerated with the design refresh; there is no older v
 Screen context is screenshot-only (`docs/implementation-plan.md` §1.1): one staged capture, no text excerpt.
 The screenshot strip is the only place where screen content appears.
 
+Screen context is screenshot-only (`docs/implementation-plan.md` §1.1): one staged capture, no text excerpt.
+The mockup board and PNGs still show the earlier text-context panel; they are regenerated in Phase 2 and
+are not the current spec.
+
 ---
 
 ## 1. Brief
