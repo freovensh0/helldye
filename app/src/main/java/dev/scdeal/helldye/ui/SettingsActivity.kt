@@ -1,6 +1,9 @@
 package dev.scdeal.helldye.ui
 
+import android.content.Intent
 import android.os.Bundle
+import android.provider.Settings
+import android.service.voice.VoiceInteractionService
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
@@ -38,12 +41,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import dev.scdeal.helldye.BuildConfig
 import dev.scdeal.helldye.R
 import dev.scdeal.helldye.gateway.GatewayClient
@@ -76,12 +82,26 @@ class SettingsActivity : ComponentActivity() {
                 var config by remember { mutableStateOf(store.load()) }
                 var message by remember { mutableStateOf<String?>(null) }
                 var success by remember { mutableStateOf(true) }
+                val context = LocalContext.current
+                var assistantActive by remember { mutableStateOf(assistantIsActive(context)) }
                 val scope = rememberCoroutineScope()
+                LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+                    assistantActive = assistantIsActive(context)
+                }
 
                 SettingsScreen(
                     config = config,
                     message = message,
                     success = success,
+                    assistantActive = assistantActive,
+                    onOpenAssistantSettings = {
+                        val intent = Intent(Settings.ACTION_VOICE_INPUT_SETTINGS)
+                        if (intent.resolveActivity(packageManager) != null) {
+                            startActivity(intent)
+                        } else {
+                            startActivity(Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS))
+                        }
+                    },
                     onConfigChange = {
                         config = it
                         message = null
@@ -131,6 +151,8 @@ private fun SettingsScreen(
     config: GatewayConfig,
     message: String?,
     success: Boolean,
+    assistantActive: Boolean,
+    onOpenAssistantSettings: () -> Unit,
     onConfigChange: (GatewayConfig) -> Unit,
     onSave: () -> Unit,
     onTest: () -> Unit,
@@ -230,6 +252,29 @@ private fun SettingsScreen(
         Spacer(Modifier.height(HelldyeDimens.Xl))
         Hairline(color = HelldyeColors.LineSoft)
         Spacer(Modifier.height(HelldyeDimens.Md))
+        SectionLabel("ASSISTANT")
+        SettingRow(
+            name = "System assistant",
+            state = if (assistantActive) "ACTIVE" else "NOT SET",
+        )
+        if (!assistantActive) {
+            Spacer(Modifier.height(HelldyeDimens.Sm))
+            Text(
+                text = "The assist gesture opens HELLDYE only while it is the system assistant. Choose HELLDYE in Android's assistant settings, then try the gesture again.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = HelldyeColors.TextSecondary,
+            )
+            Spacer(Modifier.height(HelldyeDimens.Sm))
+            HelldyeButton(
+                text = "OPEN ASSISTANT SETTINGS",
+                onClick = onOpenAssistantSettings,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+
+        Spacer(Modifier.height(HelldyeDimens.Xl))
+        Hairline(color = HelldyeColors.LineSoft)
+        Spacer(Modifier.height(HelldyeDimens.Md))
         SectionLabel("PRIVACY")
         SettingRow(name = "Screen context", state = "SCREENSHOT ONLY")
         Hairline(color = HelldyeColors.LineSoft)
@@ -252,6 +297,14 @@ private fun SettingsScreen(
         Spacer(Modifier.height(HelldyeDimens.Xl))
     }
 }
+
+private fun assistantIsActive(context: android.content.Context): Boolean =
+    runCatching {
+        VoiceInteractionService.isActiveService(
+            context,
+            android.content.ComponentName(context, dev.scdeal.helldye.voice.HelldyeVoiceInteractionService::class.java),
+        )
+    }.getOrDefault(false)
 
 @Composable
 private fun ConfigField(
