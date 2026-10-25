@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -54,7 +55,7 @@ import dev.scdeal.helldye.ui.components.Hairline
 import dev.scdeal.helldye.ui.components.HelldyeButton
 import dev.scdeal.helldye.ui.components.HelldyeButtonStyle
 import dev.scdeal.helldye.ui.components.SectionLabel
-import dev.scdeal.helldye.ui.components.Wordmark
+import dev.scdeal.helldye.ui.components.SettingRow
 import dev.scdeal.helldye.ui.theme.HelldyeColors
 import dev.scdeal.helldye.ui.theme.HelldyeDimens
 import dev.scdeal.helldye.ui.theme.HelldyeTheme
@@ -154,16 +155,22 @@ private fun SettingsScreen(
                 modifier = Modifier.heightIn(min = HelldyeDimens.TouchTarget),
             ) {
                 Icon(
-                    painter = painterResource(R.drawable.ic_close),
-                    contentDescription = "Close settings",
+                    painter = painterResource(R.drawable.ic_back),
+                    contentDescription = "Back",
                     tint = HelldyeColors.TextSecondary,
                 )
             }
-            Wordmark()
+            Spacer(Modifier.width(HelldyeDimens.Sm))
+            Text(
+                text = "SETTINGS",
+                style = MaterialTheme.typography.labelLarge,
+                color = HelldyeColors.Text,
+            )
         }
+        Hairline(color = HelldyeColors.LineSoft)
 
         Spacer(Modifier.height(HelldyeDimens.Xl))
-        SectionLabel("PI GATEWAY")
+        SectionLabel("GATEWAY")
         Spacer(Modifier.height(HelldyeDimens.Sm))
         Text(
             text = "HELLDYE talks directly to a gateway on your Pi host. The gateway owns the Pi-Bolt process and keeps sessions alive when the phone disconnects.",
@@ -219,6 +226,20 @@ private fun SettingsScreen(
                 color = if (success) HelldyeColors.TextSecondary else HelldyeColors.Signal,
             )
         }
+
+        Spacer(Modifier.height(HelldyeDimens.Xl))
+        Hairline(color = HelldyeColors.LineSoft)
+        Spacer(Modifier.height(HelldyeDimens.Md))
+        SectionLabel("PRIVACY")
+        SettingRow(name = "Screen context", state = "SCREENSHOT ONLY")
+        Hairline(color = HelldyeColors.LineSoft)
+        SettingRow(name = "Screenshots", state = "MEMORY ONLY")
+
+        Spacer(Modifier.height(HelldyeDimens.Xl))
+        Hairline(color = HelldyeColors.LineSoft)
+        Spacer(Modifier.height(HelldyeDimens.Md))
+        SectionLabel("ABOUT")
+        SettingRow(name = "Version", state = BuildConfig.VERSION_NAME)
 
         Spacer(Modifier.height(HelldyeDimens.Xl))
         Hairline(color = HelldyeColors.LineSoft)

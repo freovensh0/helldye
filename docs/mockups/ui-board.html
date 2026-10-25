@@ -124,10 +124,7 @@
     text-transform: uppercase;
     color: var(--muted);
   }
-  .phone-label b {
-    color: var(--text);
-    font-weight: 500;
-  }
+  .phone-label b { color: var(--text); font-weight: 500; }
   .phone-label .dash { color: var(--line-strong); }
 
   .phone {
@@ -191,13 +188,13 @@
     background: var(--secondary);
   }
 
-  .appbar {
-    height: 46px;
-    flex: 0 0 46px;
-    padding: 0 20px;
+  .rail {
+    height: 56px;
+    flex: 0 0 56px;
+    padding: 0 16px;
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    gap: 12px;
     border-bottom: 1px solid var(--line-soft);
   }
   .wordmark {
@@ -208,6 +205,7 @@
     letter-spacing: 0.18em;
     color: var(--text);
     padding-bottom: 7px;
+    flex: 0 0 auto;
   }
   .wordmark::after {
     content: '';
@@ -218,55 +216,44 @@
     height: 1px;
     background: var(--signal-line);
   }
-  .back {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 9px;
-    letter-spacing: 0.1em;
-    color: var(--text);
-    text-transform: uppercase;
+  .rail-title {
+    flex: 1;
+    min-width: 0;
+    font-size: 11px;
+    line-height: 16px;
+    color: var(--secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
-  .chip {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 5px 7px;
-    border: 1px solid var(--line-strong);
-    border-radius: 2px;
+  .rail-state {
+    flex: 0 0 auto;
     font-family: 'JetBrains Mono', monospace;
-    font-size: 7px;
+    font-size: 8px;
     letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--text);
+    color: var(--secondary);
   }
-  .chip .dot { width: 4px; height: 4px; background: var(--text); border-radius: 50%; }
-  .chip.off { color: var(--muted); }
-  .chip.off .dot { background: var(--muted); }
-  .chip.danger { color: var(--signal); border-color: var(--signal-line); }
-  .chip.danger .dot { background: var(--signal); }
-
-  .icon {
-    width: 16px;
-    height: 16px;
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 1.5;
-    stroke-linecap: square;
-    stroke-linejoin: miter;
-    display: block;
+  .rail-actions { display: flex; flex: 0 0 auto; }
+  .iconbtn {
+    width: 48px;
+    height: 48px;
+    display: grid;
+    place-items: center;
+    color: var(--secondary);
   }
-  .icon.round { stroke-linecap: round; stroke-linejoin: round; }
+  .icon { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.5; display: block; }
+  .icon.fill { fill: currentColor; stroke: none; }
 
-  .assistant .content {
+  .content {
     flex: 1;
     min-height: 0;
-    padding: 28px 20px 0;
+    padding: 24px 16px 0;
     display: flex;
     flex-direction: column;
+    overflow: hidden;
   }
-  .status {
+
+  .status-word {
     font-family: 'Space Grotesk', sans-serif;
     font-size: 38px;
     line-height: 1;
@@ -275,170 +262,175 @@
     color: var(--text);
   }
   .status-sub {
-    margin-top: 9px;
-    font-size: 12px;
-    line-height: 18px;
+    margin-top: 12px;
+    font-size: 13px;
+    line-height: 20px;
     color: var(--secondary);
   }
-  .wave {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    height: 44px;
-    margin: 22px 0 24px;
-  }
-  .wave i {
-    display: block;
-    width: 2px;
-    background: var(--line-strong);
-    flex: 0 0 2px;
-  }
-  .wave i.on { background: var(--text); }
-
-  .label {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 8px;
-    font-weight: 500;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--muted);
-    margin-bottom: 6px;
-  }
-  .transcript {
-    font-size: 16px;
-    line-height: 22px;
-    color: var(--text);
-    letter-spacing: -0.1px;
-  }
-  .context {
-    margin-top: 18px;
-    padding: 10px 12px;
-    border: 1px solid var(--line);
-    border-radius: 0;
-  }
-  .context .label { margin-bottom: 5px; }
-  .context .excerpt {
+  .status-hint {
+    margin-top: 4px;
     font-size: 11px;
-    line-height: 16px;
-    color: var(--secondary);
-  }
-  .context .meta {
-    margin-top: 8px;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 8px;
-    letter-spacing: 0.05em;
+    line-height: 18px;
     color: var(--muted);
-    text-transform: uppercase;
   }
-  .answer { margin-top: 18px; }
-  .answer p {
-    margin: 0;
+
+  .turn { display: flex; align-items: stretch; }
+  .user-rule { width: 2px; flex: 0 0 2px; background: var(--white); }
+  .user-text {
+    padding-left: 12px;
     font-size: 13px;
     line-height: 20px;
     color: var(--text);
   }
-  .answer p + p {
-    margin-top: 6px;
-    color: var(--secondary);
+  .answer {
+    margin-top: 16px;
+    font-size: 12px;
+    line-height: 19px;
+    color: var(--text);
   }
-  .session {
-    margin-top: auto;
-    padding: 12px 0 16px;
+  .answer .soft { color: var(--secondary); }
+
+  .disclosure {
+    margin-top: 16px;
+    min-height: 48px;
     border-top: 1px solid var(--line-soft);
     display: flex;
-    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
     font-family: 'JetBrains Mono', monospace;
     font-size: 7px;
     letter-spacing: 0.08em;
-    color: var(--muted);
     text-transform: uppercase;
+    color: var(--muted);
   }
+  .disclosure .right { margin-left: auto; }
+  .disclosure .summary { color: var(--signal); }
+  .disclosure .right.failed { color: var(--signal); }
+  .disclosure .name { color: var(--text); }
 
-  .bottombar {
-    flex: 0 0 64px;
-    height: 64px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    padding: 0 20px;
-    border-top: 1px solid var(--line-soft);
+  .bottom {
+    flex: 0 0 auto;
+    padding: 8px 16px 12px;
+    background: var(--black);
   }
-  .mic {
-    width: 44px;
-    height: 44px;
-    display: grid;
-    place-items: center;
-    border: 1px solid var(--line-strong);
+  .strip {
+    height: 56px;
+    border: 1px solid var(--line);
     border-radius: 2px;
-    color: var(--text);
-    background: transparent;
-  }
-  .mic .icon { width: 18px; height: 18px; }
-  .ghost {
     display: flex;
     align-items: center;
-    gap: 7px;
+    padding-left: 8px;
+    margin-bottom: 8px;
+  }
+  .thumb {
+    width: 40px;
+    height: 40px;
+    flex: 0 0 40px;
+    border: 1px solid var(--line);
+    border-radius: 2px;
+    background: var(--black);
+    overflow: hidden;
+    padding: 5px;
+  }
+  .thumb i {
+    display: block;
+    height: 2px;
+    background: var(--line-strong);
+    margin-bottom: 3px;
+  }
+  .thumb i:nth-child(1) { width: 20px; }
+  .thumb i:nth-child(2) { width: 28px; }
+  .thumb i:nth-child(3) { width: 14px; }
+  .strip-label {
+    margin-left: 8px;
     font-family: 'JetBrains Mono', monospace;
     font-size: 8px;
-    letter-spacing: 0.1em;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: var(--secondary);
+    color: var(--text);
   }
-  .ghost .icon { width: 14px; height: 14px; }
+  .strip-state {
+    margin-left: 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .strip-size {
+    margin-left: 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 7px;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+  }
+  .strip .remove { margin-left: auto; }
 
-  .onboarding .content {
-    flex: 1;
-    min-height: 0;
-    padding: 26px 20px 18px;
+  .statusline {
+    height: 48px;
     display: flex;
-    flex-direction: column;
+    align-items: center;
+    padding: 0 4px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 7px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
-  .onboarding .eyebrow {
-    margin-top: 26px;
+  .composer {
+    height: 56px;
+    border: 1px solid var(--line-strong);
+    border-radius: 2px;
+    display: flex;
+    align-items: center;
+    padding: 4px;
+    gap: 2px;
+  }
+  .composer .iconbtn { width: 44px; height: 44px; }
+  .composer .placeholder {
+    flex: 1;
+    min-width: 0;
+    padding: 0 8px;
+    font-size: 12px;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .settings .rail { gap: 8px; }
+  .settings .rail-title { flex: 0 0 auto; color: var(--text); font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; }
+  .settings .content { padding: 16px 16px 0; }
+  .section {
+    margin: 18px 0 4px;
     font-family: 'JetBrains Mono', monospace;
     font-size: 8px;
     letter-spacing: 0.12em;
     color: var(--muted);
     text-transform: uppercase;
   }
-  .onboarding h1 {
-    margin: 8px 0 10px;
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 30px;
-    line-height: 33px;
-    font-weight: 600;
-    letter-spacing: -0.5px;
-  }
-  .onboarding .lede {
-    margin: 0;
-    font-size: 12px;
-    line-height: 18px;
-    color: var(--secondary);
-  }
-  .rows {
-    margin-top: 24px;
-    border-top: 1px solid var(--line);
-  }
-  .row {
-    min-height: 54px;
+  .srow {
+    min-height: 56px;
     display: flex;
     align-items: center;
     gap: 8px;
-    border-bottom: 1px solid var(--line-soft);
+    border-top: 1px solid var(--line-soft);
   }
-  .row-main { flex: 1; min-width: 0; }
-  .row .name { font-size: 12px; line-height: 16px; color: var(--text); }
-  .row .state {
-    margin-top: 3px;
+  .srow.last { border-bottom: 1px solid var(--line-soft); }
+  .sname { flex: 1; min-width: 0; font-size: 12px; line-height: 16px; color: var(--text); }
+  .sval {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 8px;
-    letter-spacing: 0.08em;
-    color: var(--muted);
+    font-size: 7px;
+    letter-spacing: 0.06em;
+    color: var(--secondary);
     text-transform: uppercase;
+    white-space: nowrap;
   }
-  .row .state.ok { color: var(--text); }
-  .row .action {
+  .sval.mask { letter-spacing: 0.18em; }
+  .saction {
     flex: 0 0 auto;
     padding: 6px 7px;
     border: 1px solid var(--line-strong);
@@ -449,43 +441,7 @@
     color: var(--text);
     text-transform: uppercase;
   }
-  .row .action.danger { color: var(--signal); border-color: var(--signal-line); }
-  .warning {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-top: 16px;
-    padding: 9px 10px;
-    border: 1px solid var(--signal-line);
-    border-radius: 2px;
-  }
-  .warning .icon {
-    width: 14px;
-    height: 14px;
-    flex: 0 0 14px;
-    color: var(--signal);
-  }
-  .warning-copy {
-    flex: 1;
-    font-size: 10px;
-    line-height: 14px;
-    color: var(--text);
-  }
-  .warning-copy b { font-weight: 500; }
-  .warning-action {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 7px;
-    letter-spacing: 0.08em;
-    color: var(--signal);
-    text-transform: uppercase;
-  }
-  .actions {
-    margin-top: auto;
-    padding-top: 22px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
+  .actions { margin-top: 20px; display: flex; flex-direction: column; gap: 8px; }
   .btn {
     height: 44px;
     display: grid;
@@ -499,85 +455,6 @@
   }
   .btn.primary { background: var(--text); color: var(--black); }
   .btn.secondary { border: 1px solid var(--line-strong); color: var(--text); }
-  .footnote {
-    margin: 12px 0 0;
-    text-align: center;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 7px;
-    line-height: 12px;
-    letter-spacing: 0.04em;
-    color: var(--muted);
-  }
-
-  .settings .content {
-    flex: 1;
-    min-height: 0;
-    padding: 18px 20px 0;
-    overflow: hidden;
-  }
-  .settings h1 {
-    margin: 8px 0 16px;
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 26px;
-    line-height: 30px;
-    font-weight: 600;
-    letter-spacing: -0.4px;
-  }
-  .section {
-    margin: 17px 0 5px;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 8px;
-    letter-spacing: 0.12em;
-    color: var(--muted);
-    text-transform: uppercase;
-  }
-  .srow {
-    min-height: 46px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    border-top: 1px solid var(--line-soft);
-  }
-  .srow.last { border-bottom: 1px solid var(--line-soft); }
-  .sname { flex: 1; font-size: 12px; color: var(--text); }
-  .sval {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 8px;
-    letter-spacing: 0.06em;
-    color: var(--secondary);
-    text-transform: uppercase;
-  }
-  .saction {
-    padding: 5px 6px;
-    border: 1px solid var(--line-strong);
-    border-radius: 2px;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 7px;
-    letter-spacing: 0.08em;
-    color: var(--text);
-    text-transform: uppercase;
-  }
-  .saction.danger { color: var(--signal); border-color: var(--signal-line); }
-  .toggle {
-    width: 34px;
-    height: 18px;
-    border: 1px solid var(--line-strong);
-    border-radius: 2px;
-    position: relative;
-    flex: 0 0 34px;
-  }
-  .toggle::after {
-    content: '';
-    position: absolute;
-    left: 2px;
-    top: 2px;
-    width: 12px;
-    height: 12px;
-    background: var(--muted);
-    border-radius: 1px;
-  }
-  .toggle.on { background: var(--text); border-color: var(--text); }
-  .toggle.on::after { left: auto; right: 2px; background: var(--black); }
 
   .footer {
     margin-top: 18px;
@@ -591,6 +468,33 @@
     text-transform: uppercase;
   }
   .footer .right { color: var(--line-strong); }
+
+  /* The board doubles as the source for assistant-screen.png: #screen shows only phone 02 at 2x. */
+  html.screen-only, html.screen-only body {
+    width: 760px;
+    height: 1642px;
+    min-height: 1642px;
+    overflow: hidden;
+    background: var(--black);
+  }
+  html.screen-only .board {
+    width: 760px;
+    height: 1642px;
+    padding: 0;
+    background: var(--black);
+  }
+  html.screen-only .top,
+  html.screen-only .footer { display: none; }
+  html.screen-only .phones { display: block; margin: 0; }
+  html.screen-only .phone-wrap:not(.assistant-shot) { display: none; }
+  html.screen-only .assistant-shot { width: 760px; height: 1642px; }
+  html.screen-only .assistant-shot .phone-label { display: none; }
+  html.screen-only .assistant-shot .phone {
+    width: 380px;
+    height: 820px;
+    transform: scale(2);
+    transform-origin: top left;
+  }
 </style>
 </head>
 <body>
@@ -598,20 +502,20 @@
   <header class="top">
     <div>
       <div class="brandmark">HELLDYE</div>
-      <div class="kicker">UI direction / Compose / research mock</div>
+      <div class="kicker">UI direction / Compose / Phase 2</div>
     </div>
     <div class="meta">
       <b>BLACK · HAIRLINE · MONO</b><br>
       one signal red · 0–4dp corners<br>
-      90–160ms state-only motion
+      16dp gutter · 48dp targets
     </div>
   </header>
 
   <main class="phones">
     <section class="phone-wrap">
-      <div class="phone-label"><span><b>01</b> <span class="dash">/</span> ONBOARDING</span><span>DEFAULT ASSISTANT</span></div>
+      <div class="phone-label"><span><b>01</b> <span class="dash">/</span> ASSISTANT</span><span>EMPTY</span></div>
       <div class="phone">
-        <div class="screen onboarding">
+        <div class="screen">
           <div class="statusbar">
             <span>09:41</span>
             <span class="right">
@@ -620,62 +524,47 @@
               <span class="battery"></span>
             </span>
           </div>
-          <div class="appbar">
+          <div class="rail">
             <div class="wordmark">HELLDYE</div>
-            <div class="chip off"><span class="dot"></span>NOT DEFAULT</div>
+            <div class="rail-title">SESSION 4F2A</div>
+            <div class="rail-state">READY</div>
+            <div class="rail-actions">
+              <div class="iconbtn" aria-label="More actions">
+                <svg class="icon fill" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5h4v4h-4zM10 10h4v4h-4zM10 15h4v4h-4z"></path></svg>
+              </div>
+              <div class="iconbtn" aria-label="Close assistant">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+              </div>
+            </div>
           </div>
           <div class="content">
-            <div class="eyebrow">01 / SETUP</div>
-            <h1>Your assistant.<br>On your terms.</h1>
-            <p class="lede">Screen context is read only when you ask. Nothing leaves the device unless you choose it.</p>
-
-            <div class="rows">
-              <div class="row">
-                <div class="row-main">
-                  <div class="name">Default assistant</div>
-                  <div class="state">NOT SET</div>
-                </div>
-                <div class="action">SET</div>
+            <div class="status-word">READY</div>
+            <div class="status-sub">Ask about the screen, or type.</div>
+            <div class="status-hint">Screenshots stay on this phone until you send.</div>
+          </div>
+          <div class="bottom">
+            <div class="statusline">MODEL · THINKING · CONTEXT</div>
+            <div class="composer">
+              <div class="iconbtn" aria-label="Add attachment">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
               </div>
-              <div class="row">
-                <div class="row-main">
-                  <div class="name">Screen context</div>
-                  <div class="state">OFF</div>
-                </div>
-                <div class="action">OPEN</div>
+              <div class="placeholder">Ask HELLDYE</div>
+              <div class="iconbtn" aria-label="Voice input">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8"></path></svg>
               </div>
-              <div class="row">
-                <div class="row-main">
-                  <div class="name">Microphone</div>
-                  <div class="state">MISSING</div>
-                </div>
-                <div class="action">GRANT</div>
+              <div class="iconbtn" aria-label="Send">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12l16-8-6 8 6 8z"></path></svg>
               </div>
-            </div>
-
-            <div class="warning">
-              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M12 3L2.5 20h19L12 3z"></path>
-                <path d="M12 9v5M12 17h.01"></path>
-              </svg>
-              <div class="warning-copy"><b>Screen access is off.</b> Enable it in system settings.</div>
-              <div class="warning-action">OPEN</div>
-            </div>
-
-            <div class="actions">
-              <div class="btn primary">SET AS DEFAULT ASSISTANT</div>
-              <div class="btn secondary">OPEN ASSISTANT SETTINGS</div>
-              <p class="footnote">Works with the system assist gesture.<br>Power-button behavior depends on the device.</p>
             </div>
           </div>
         </div>
       </div>
     </section>
 
-    <section class="phone-wrap">
-      <div class="phone-label"><span><b>02</b> <span class="dash">/</span> ASSISTANT</span><span>SCREEN CONTEXT ON</span></div>
+    <section class="phone-wrap assistant-shot">
+      <div class="phone-label"><span><b>02</b> <span class="dash">/</span> ASSISTANT</span><span>SCREENSHOT STAGED</span></div>
       <div class="phone">
-        <div class="screen assistant">
+        <div class="screen">
           <div class="statusbar">
             <span>09:41</span>
             <span class="right">
@@ -684,64 +573,71 @@
               <span class="battery"></span>
             </span>
           </div>
-          <div class="appbar">
+          <div class="rail">
             <div class="wordmark">HELLDYE</div>
-            <div class="chip"><span class="dot"></span>SCREEN ON</div>
+            <div class="rail-title">SESSION 4F2A</div>
+            <div class="rail-state">THINKING</div>
+            <div class="rail-actions">
+              <div class="iconbtn" aria-label="More actions">
+                <svg class="icon fill" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5h4v4h-4zM10 10h4v4h-4zM10 15h4v4h-4z"></path></svg>
+              </div>
+              <div class="iconbtn" aria-label="Close assistant">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+              </div>
+            </div>
           </div>
           <div class="content">
-            <div class="status">LISTENING</div>
-            <div class="status-sub">Speak, or type. The answer stays on this screen.</div>
-
-            <div class="wave" aria-hidden="true">
-              <i style="height:7px"></i><i style="height:12px"></i><i style="height:18px" class="on"></i><i style="height:10px"></i>
-              <i style="height:24px" class="on"></i><i style="height:16px"></i><i style="height:9px"></i><i style="height:26px" class="on"></i>
-              <i style="height:34px" class="on"></i><i style="height:18px"></i><i style="height:8px"></i><i style="height:22px" class="on"></i>
-              <i style="height:30px" class="on"></i><i style="height:14px"></i><i style="height:9px"></i><i style="height:20px" class="on"></i>
-              <i style="height:38px" class="on"></i><i style="height:22px"></i><i style="height:10px"></i><i style="height:15px"></i>
-              <i style="height:28px" class="on"></i><i style="height:36px" class="on"></i><i style="height:18px"></i><i style="height:8px"></i>
-              <i style="height:14px"></i><i style="height:24px" class="on"></i><i style="height:32px" class="on"></i><i style="height:16px"></i>
-              <i style="height:10px"></i><i style="height:6px"></i>
+            <div class="turn">
+              <div class="user-rule"></div>
+              <div class="user-text">What is wrong with this layout?</div>
             </div>
-
-            <div class="label">TRANSCRIPT</div>
-            <div class="transcript">What changed in my battery settings?</div>
-
-            <div class="context">
-              <div class="label">SCREEN CONTEXT</div>
-              <div class="excerpt">Settings / Battery / Battery usage — the screen shows the last 24 hours and a list of apps.</div>
-              <div class="meta">2 LINES · 148 CHARS · TEXT ONLY</div>
+            <div class="disclosure">
+              <span>THINKING · 3 LINES</span>
+              <span class="right">SHOW</span>
             </div>
-
-            <div class="answer">
-              <div class="label">ANSWER</div>
-              <p>Battery usage is down 8% since this morning. The largest drain is the display, followed by the assistant service.</p>
-              <p>No screenshot was attached. Screen capture was off; screen text is never read and nothing about the screen was kept.</p>
+            <div class="answer">The rail is taller than the content. I kept one 56dp rail and removed the duplicate status row.</div>
+            <div class="disclosure">
+              <span class="summary">3 TOOLS · 1 FAILED</span>
+              <span class="right">HIDE</span>
             </div>
-
-            <div class="session">
-              <span>LOCAL SESSION</span>
-              <span>TEXT ONLY · NO SCREENSHOT</span>
+            <div class="disclosure">
+              <span class="name">BASH</span>
+              <span>npm test</span>
+              <span class="right">60MS · DONE</span>
+            </div>
+            <div class="disclosure">
+              <span class="name">READ</span>
+              <span>package.json</span>
+              <span class="right">12MS · DONE</span>
+            </div>
+            <div class="disclosure">
+              <span class="name">EDIT</span>
+              <span>src/app.ts</span>
+              <span class="right failed">FAILED</span>
             </div>
           </div>
-          <div class="bottombar">
-            <div class="mic" aria-label="Microphone">
-              <svg class="icon round" viewBox="0 0 24 24" aria-hidden="true">
-                <rect x="9" y="3" width="6" height="11" rx="3"></rect>
-                <path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8"></path>
-              </svg>
+          <div class="bottom">
+            <div class="strip">
+              <div class="thumb" aria-hidden="true"><i></i><i></i><i></i></div>
+              <span class="strip-label">SCREEN</span>
+              <span class="strip-state">TEMP</span>
+              <span class="strip-size">1.2 MB</span>
+              <div class="iconbtn remove" aria-label="Remove screenshot">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+              </div>
             </div>
-            <div class="ghost">
-              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-                <rect x="3" y="6" width="18" height="12" rx="1"></rect>
-                <path d="M6 10h1M10 10h1M14 10h1M18 10h.01M6 14h12"></path>
-              </svg>
-              TYPE
-            </div>
-            <div class="ghost">
-              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M6 6l12 12M18 6L6 18"></path>
-              </svg>
-              CLOSE
+            <div class="statusline">OPUS 4.1 · THINK MEDIUM · CTX 42%</div>
+            <div class="composer">
+              <div class="iconbtn" aria-label="Add attachment">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+              </div>
+              <div class="placeholder">Ask HELLDYE</div>
+              <div class="iconbtn" aria-label="Voice input">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8"></path></svg>
+              </div>
+              <div class="iconbtn" aria-label="Stop">
+                <svg class="icon fill" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6h12v12H6z"></path></svg>
+              </div>
             </div>
           </div>
         </div>
@@ -749,7 +645,7 @@
     </section>
 
     <section class="phone-wrap">
-      <div class="phone-label"><span><b>03</b> <span class="dash">/</span> SETTINGS</span><span>SYSTEM-CONTROLLED ROWS</span></div>
+      <div class="phone-label"><span><b>03</b> <span class="dash">/</span> SETTINGS</span><span>FLAT LIST</span></div>
       <div class="phone">
         <div class="screen settings">
           <div class="statusbar">
@@ -760,66 +656,45 @@
               <span class="battery"></span>
             </span>
           </div>
-          <div class="appbar">
-            <div class="back">
+          <div class="rail">
+            <div class="iconbtn" aria-label="Close settings">
               <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18l-6-6 6-6"></path></svg>
-              SETTINGS
             </div>
-            <div class="chip off"><span class="dot"></span>LOCAL</div>
+            <div class="rail-title">SETTINGS</div>
           </div>
           <div class="content">
-            <h1>Settings</h1>
-
-            <div class="section">ASSISTANT</div>
+            <div class="section">GATEWAY</div>
             <div class="srow">
-              <div class="sname">Default assistant</div>
-              <div class="sval">NOT SET</div>
-              <div class="saction">CHANGE</div>
+              <div class="sname">Gateway URL</div>
+              <div class="sval">phone.tailnet.ts.net</div>
+            </div>
+            <div class="srow">
+              <div class="sname">Token</div>
+              <div class="sval mask">••••••••</div>
             </div>
             <div class="srow last">
-              <div class="sname">Open on assist gesture</div>
-              <div class="toggle on"></div>
+              <div class="sname">Workspace</div>
+              <div class="sval">/home/you/code</div>
             </div>
-
-            <div class="section">SCREEN CONTEXT</div>
-            <div class="srow">
-              <div class="sname">Screen access</div>
-              <div class="sval">OFF</div>
-              <div class="saction">OPEN</div>
-            </div>
-            <div class="srow last">
-              <div class="sname">Screenshot included</div>
-              <div class="sval">—</div>
-            </div>
-
-            <div class="section">VOICE</div>
-            <div class="srow">
-              <div class="sname">Microphone</div>
-              <div class="sval">GRANTED</div>
-            </div>
-            <div class="srow last">
-              <div class="sname">Language</div>
-              <div class="sval">EN</div>
+            <div class="actions">
+              <div class="btn primary">SAVE</div>
+              <div class="btn secondary">TEST CONNECTION</div>
             </div>
 
             <div class="section">PRIVACY</div>
             <div class="srow">
-              <div class="sname">History</div>
-              <div class="toggle"></div>
+              <div class="sname">Screen context</div>
+              <div class="sval">SCREENSHOT ONLY</div>
             </div>
             <div class="srow last">
-              <div class="sname">Clear local data</div>
-              <div class="saction danger">CLEAR</div>
+              <div class="sname">Screenshots</div>
+              <div class="sval">MEMORY ONLY</div>
             </div>
 
             <div class="section">ABOUT</div>
-            <div class="srow">
+            <div class="srow last">
               <div class="sname">Version</div>
               <div class="sval">0.1.0</div>
-            </div>
-            <div class="srow last">
-              <div class="sname">Licenses</div>
-              <div class="saction">OPEN</div>
             </div>
           </div>
         </div>
@@ -832,5 +707,10 @@
     <span class="right">FIRST FRAME IS FINAL</span>
   </footer>
 </div>
+<script>
+  if (location.hash === '#screen') {
+    document.documentElement.classList.add('screen-only');
+  }
+</script>
 </body>
 </html>
