@@ -43,10 +43,12 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import dev.scdeal.helldye.BuildConfig
 import dev.scdeal.helldye.R
 import dev.scdeal.helldye.gateway.GatewayClient
 import dev.scdeal.helldye.gateway.GatewayConfig
 import dev.scdeal.helldye.gateway.GatewaySessionStore
+import dev.scdeal.helldye.gateway.GatewayUrlPolicy
 import dev.scdeal.helldye.gateway.SettingsStore
 import dev.scdeal.helldye.ui.components.Hairline
 import dev.scdeal.helldye.ui.components.HelldyeButton
@@ -84,14 +86,21 @@ class SettingsActivity : ComponentActivity() {
                         message = null
                     },
                     onSave = {
-                        success = store.save(config)
-                        GatewaySessionStore.reset()
-                        message = if (success) "SAVED" else "TOKEN STORAGE UNAVAILABLE"
+                        val error = GatewayUrlPolicy.validate(config.url, BuildConfig.DEBUG)
+                        if (error != null) {
+                            success = false
+                            message = error
+                        } else {
+                            success = store.save(config)
+                            GatewaySessionStore.reset()
+                            message = if (success) "SAVED" else "TOKEN STORAGE UNAVAILABLE"
+                        }
                     },
                     onTest = {
-                        if (config.url.isBlank()) {
+                        val error = GatewayUrlPolicy.validate(config.url, BuildConfig.DEBUG)
+                        if (error != null) {
                             success = false
-                            message = "GATEWAY URL IS EMPTY"
+                            message = error
                         } else {
                             scope.launch {
                                 success = true
@@ -101,7 +110,7 @@ class SettingsActivity : ComponentActivity() {
                                 }
                                 result.onSuccess {
                                     success = true
-                                    message = "CONNECTED · ${it.optString("piBin", "pi-bolt")}"
+                                    message = "CONNECTED · ${it.optString("version", "gateway")}"
                                 }.onFailure {
                                     success = false
                                     message = it.message ?: "CONNECTION FAILED"
@@ -174,7 +183,7 @@ private fun SettingsScreen(
         ConfigField(
             label = "TOKEN",
             value = config.token,
-            placeholder = "optional bearer token",
+            placeholder = "required bearer token",
             keyboardType = KeyboardType.Password,
             password = true,
             onValueChange = { onConfigChange(config.copy(token = it)) },
