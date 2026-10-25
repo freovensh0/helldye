@@ -362,6 +362,8 @@ private fun SettingsPreview() {
             config = GatewayConfig(url = "https://phone.tailnet.ts.net", cwd = "/home/you/code"),
             message = "CONNECTED · pi-bolt",
             success = true,
+            assistantActive = true,
+            onOpenAssistantSettings = {},
             onConfigChange = {},
             onSave = {},
             onTest = {},
