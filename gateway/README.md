@@ -25,7 +25,8 @@ Environment: `HELLDYE_PI_BIN`, `HELLDYE_TOOLS`, `HELLDYE_TOKEN` or `HELLDYE_TOKE
 A bearer token is **required for every start, including loopback**. The gateway exits instead of
 serving `/v1` without one. Use `HELLDYE_TOKEN` or point `HELLDYE_TOKEN_FILE` at a file that is mode
 `0600` on Unix; any other mode is rejected. There is no `--token` flag, because a flag would expose
-the token in the process list. The token file should live outside every workspace root.
+the token in the process list. The token file must live outside every workspace root; startup is
+rejected if it is inside one.
 
 `HELLDYE_WORKSPACES` is a colon-separated allowlist of absolute directories and is also required.
 A session `cwd` must be an absolute path inside one of those roots; `..`, relative paths, and

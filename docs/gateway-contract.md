@@ -19,8 +19,8 @@ the session list, and the event stream.
 - Every `/v1` route requires `Authorization: Bearer <token>`, including loopback. `GET /health` is
   the only unauthenticated route.
 - The token comes from `HELLDYE_TOKEN` or `HELLDYE_TOKEN_FILE`. There is no `--token` flag. A token
-  file must be mode `0600` on Unix; any other mode aborts startup. The gateway refuses to start
-  without a token at all.
+  file must be mode `0600` on Unix and must be outside every workspace root; any other mode or an
+  in-workspace file aborts startup. The gateway refuses to start without a token at all.
 - Missing or wrong token: `401` with an empty body. There is no `WWW-Authenticate` header.
   Comparison is constant-time.
 - Request bodies are limited to 12 MiB. Base64 images count against that limit.

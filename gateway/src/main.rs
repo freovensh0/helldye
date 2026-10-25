@@ -310,6 +310,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workspaces = resolve_workspaces().map_err(|error| -> Box<dyn std::error::Error> {
         format!("refusing to start: {error}").into()
     })?;
+    if let Ok(path) = env::var("HELLDYE_TOKEN_FILE") {
+        ensure_token_file_outside_workspaces(Path::new(&path), &workspaces).map_err(
+            |error| -> Box<dyn std::error::Error> { format!("refusing to start: {error}").into() },
+        )?;
+    }
     let debug_stderr = env::var("HELLDYE_DEBUG")
         .map(|value| is_truthy(&value))
         .unwrap_or(false);
@@ -448,6 +453,16 @@ fn read_token_file(path: &Path) -> Result<String, String> {
         return Err("HELLDYE_TOKEN_FILE is empty".to_string());
     }
     Ok(token)
+}
+
+fn ensure_token_file_outside_workspaces(path: &Path, roots: &[PathBuf]) -> Result<(), String> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| format!("cannot read HELLDYE_TOKEN_FILE: {error}"))?;
+    if roots.iter().any(|root| canonical.starts_with(root)) {
+        return Err("HELLDYE_TOKEN_FILE must be outside every HELLDYE_WORKSPACES root".to_string());
+    }
+    Ok(())
 }
 
 fn resolve_workspaces() -> Result<Vec<PathBuf>, String> {
@@ -1378,9 +1393,10 @@ fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ContextFile, ImageBody, PromptContext, constant_time_eq, decode_base64, info_payload,
-        jpeg_dimensions, migrated_name, neutral_name, pi_command, png_dimensions, read_token_file,
-        redact_stderr_line, resolve_workspace, validate_images,
+        ContextFile, ImageBody, PromptContext, constant_time_eq, decode_base64,
+        ensure_token_file_outside_workspaces, info_payload, jpeg_dimensions, migrated_name,
+        neutral_name, pi_command, png_dimensions, read_token_file, redact_stderr_line,
+        resolve_workspace, validate_images,
     };
     use axum::http::StatusCode;
     use std::{fs, path::PathBuf};
@@ -1576,6 +1592,22 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(read_token_file(&path).unwrap(), "secret");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn token_file_must_stay_outside_workspaces() {
+        let root = temp_dir("token-workspace");
+        let inside = root.join("token");
+        fs::write(&inside, "secret").unwrap();
+        let roots = vec![root.canonicalize().unwrap()];
+        assert!(ensure_token_file_outside_workspaces(&inside, &roots).is_err());
+
+        let outside = temp_dir("token-outside");
+        let outside_file = outside.join("token");
+        fs::write(&outside_file, "secret").unwrap();
+        ensure_token_file_outside_workspaces(&outside_file, &roots).unwrap();
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
     }
 
     #[test]
