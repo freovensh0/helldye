@@ -129,6 +129,8 @@ Pi.
   magic bytes, dimensions, and size before forwarding.
 - For an ephemeral session (§6.1) the same prompt shape is used; the image and answer are not persisted
   by the gateway and Pi runs with `--no-session`.
+- When images are present, the gateway prefixes an `IMAGE DATA RULE` block (or includes the image
+  warning in the context rule) that labels the image as untrusted data, not instructions.
 - `message` may be empty only when at least one image is present; otherwise `400 message is empty`.
 - While a turn is streaming, the gateway adds `streamingBehavior: "steer"` to the Pi command.
 - The response means "accepted by the gateway for delivery to Pi", not "turn finished". Output arrives on
