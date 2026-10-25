@@ -58,6 +58,9 @@ not evidence that the project builds. A change is verified only by a green run o
   `pi-gateway` over HTTPS/SSE. Do not spawn Pi inside the APK.
 - One Pi session has one writer. The gateway owns session lifetime and event replay. The client may
   detach and reattach without aborting a run.
+- Removing a session is "remove from list": it deletes the gateway record only. The Pi transcript stays
+  on the host. "Purge on host" is a manual host operation, never a phone action. Never claim a session
+  or its transcript was deleted from the phone.
 - Screen context is screenshot-only. The assist gesture may capture one screenshot. The app never reads
   screen text, runs OCR, traverses `AssistStructure`, scrapes the clipboard, or uses
   `AccessibilityService` or `MediaProjection`.

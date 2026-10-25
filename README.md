@@ -40,8 +40,11 @@ run a Pi process itself.
 Screen context is screenshot-only. The app never reads screen text, traverses `AssistStructure`, runs
 OCR, or uses `AccessibilityService` or `MediaProjection`. A capture is staged in memory, sent only
 when you submit, and never written to preferences, files, or logs; removing it or closing the overlay
-drops it. Screen queries are ephemeral in the app, but Pi owns each session transcript on the host;
-removing a session in the app does not delete that transcript.
+drops it. Screen queries are ephemeral in the app, but Pi owns each session transcript on the host.
+
+Removing a session in the app is **remove from list**: it deletes the gateway record only. The Pi
+transcript stays on the host. **Purge on host** means stopping the gateway and deleting the Pi session
+file yourself; the phone has no purge action and never claims a session was deleted.
 
 ## Install (Termux)
 
