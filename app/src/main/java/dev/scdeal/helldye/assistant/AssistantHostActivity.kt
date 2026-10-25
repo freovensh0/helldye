@@ -80,8 +80,8 @@ abstract class AssistantHostActivity : ComponentActivity() {
 
     @Composable
     private fun AssistantContent() {
-        val screenshot by AssistInbox.screenshot.collectAsStateWithLifecycle()
-        val assistReceived by AssistInbox.assistReceived.collectAsStateWithLifecycle()
+        val screenshot by ScreenshotStager.bitmap.collectAsStateWithLifecycle()
+        val screenState by ScreenshotStager.state.collectAsStateWithLifecycle()
         val state by viewModel.state.collectAsStateWithLifecycle()
         val expandAction: (() -> Unit)? = if (overlay) {
             {
@@ -98,11 +98,12 @@ abstract class AssistantHostActivity : ComponentActivity() {
         AssistantScreen(
             overlay = overlay,
             screenshot = if (overlay) screenshot else null,
-            assistReceived = assistReceived,
+            screenState = if (overlay) screenState else ScreenCaptureState.None,
             state = state,
             onSubmit = viewModel::submit,
             onAddAttachment = viewModel::addAttachment,
             onRemoveAttachment = viewModel::removeAttachment,
+            onRemoveScreenshot = viewModel::removeScreenshot,
             onNotice = viewModel::notice,
             onDismissNotice = viewModel::dismissNotice,
             onOpenSettings = {
@@ -137,7 +138,11 @@ abstract class AssistantHostActivity : ComponentActivity() {
     }
 
     override fun onStop() {
-        if (overlay) AssistInbox.clear()
+        // Backgrounding or hiding drops the capture; rotation keeps it in the stager.
+        if (overlay && !isChangingConfigurations) {
+            ScreenshotStager.clear()
+            viewModel.clearScreenQuery()
+        }
         super.onStop()
     }
 
@@ -166,7 +171,8 @@ abstract class AssistantHostActivity : ComponentActivity() {
     override fun onDestroy() {
         if (!isChangingConfigurations) {
             if (overlay) {
-                AssistInbox.clear()
+                ScreenshotStager.clear()
+                viewModel.clearScreenQuery()
                 if (!keepDraftOnDestroy) AssistantDraftStore.clear()
             } else {
                 AssistantDraftStore.clear()

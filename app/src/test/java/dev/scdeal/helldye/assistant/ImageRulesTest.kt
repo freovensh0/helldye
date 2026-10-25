@@ -35,4 +35,12 @@ class ImageRulesTest {
         assertTrue(ImageRules.withinBudget(existing, photo(1_000_000)))
         assertFalse(ImageRules.withinBudget(existing, photo(1_700_000)))
     }
+
+    @Test
+    fun `a capture must fit the long edge and per image limit`() {
+        assertTrue(ImageRules.fitsCapture(1_568, 1_176, 1_500_000))
+        assertFalse(ImageRules.fitsCapture(1_569, 1_176, 100))
+        assertFalse(ImageRules.fitsCapture(800, 600, 1_500_001))
+        assertFalse(ImageRules.fitsCapture(0, 600, 100))
+    }
 }

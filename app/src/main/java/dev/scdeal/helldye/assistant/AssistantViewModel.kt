@@ -12,15 +12,21 @@ import dev.scdeal.helldye.gateway.GatewayModel
 import dev.scdeal.helldye.gateway.GatewaySession
 import dev.scdeal.helldye.gateway.GatewaySessionStore
 import dev.scdeal.helldye.gateway.SettingsStore
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.takeWhile
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -36,6 +42,13 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     private var client: GatewayClient? = null
     private var streamJob: Job? = null
+    private var screenJob: Job? = null
+    private var screenCollectorJob: Job? = null
+    @Volatile
+    private var screenSessionId: String? = null
+    @Volatile
+    private var screenAssistantId: String? = null
+    private var activeCwd: String? = null
     private var capabilitiesJob: Job? = null
     private var capabilitiesSessionId: String? = null
     private var activeAssistantId: String? = null
@@ -61,6 +74,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     return@launch
                 }
                 _state.update { it.copy(sessionId = sessionId) }
+                activeCwd = info.getOrNull()?.cwd?.takeIf { cwd -> cwd.isNotBlank() }
                 attach(gateway, sessionId)
             }
         }
@@ -69,13 +83,28 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     fun submit(text: String) {
         val prompt = text.trim()
         val attachments = _state.value.attachments
-        if (prompt.isEmpty() && attachments.isEmpty()) return
+        val screenReady = ScreenshotStager.state.value == ScreenCaptureState.Ready
+        if (prompt.isEmpty() && attachments.isEmpty() && !screenReady) return
 
         val config = settings.load()
         if (config.url.isBlank()) {
             notice("Configure the Pi gateway in Settings first.")
             return
         }
+
+        if (screenReady) {
+            val photos = ScreenQuery.photos(attachments)
+            if (photos.size + 1 > ImageRules.MAX_IMAGES) {
+                notice("At most ${ImageRules.MAX_IMAGES} images can be attached.")
+                return
+            }
+            val shot = ScreenshotStager.consume() ?: return
+            submitScreenQuery(config, prompt, attachments, shot)
+            return
+        }
+
+        // A blocked/off strip is dismissed by a text-only send; no image is claimed.
+        if (ScreenshotStager.state.value != ScreenCaptureState.None) ScreenshotStager.clear()
 
         val display = prompt.ifBlank { "Use the attached context." }
         addUserMessage(display)
@@ -116,8 +145,138 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    /**
+     * A screenshot submit is one-shot: an ephemeral gateway session with `--no-session` and the
+     * read-only tools. Its answer lives in [AssistantUiState.screenMessages] and is never restored
+     * from `/messages` or added to the persistent transcript.
+     */
+    private fun submitScreenQuery(
+        config: dev.scdeal.helldye.gateway.GatewayConfig,
+        prompt: String,
+        attachments: List<Attachment>,
+        bitmap: android.graphics.Bitmap,
+    ) {
+        val display = ScreenQuery.prompt(prompt)
+        _state.update {
+            it.copy(
+                screenMessages = listOf(
+                    ChatMessage(
+                        id = UUID.randomUUID().toString(),
+                        role = ChatRole.User,
+                        text = display,
+                    ),
+                ),
+                screenQuery = true,
+                streaming = true,
+                attachments = emptyList(),
+                error = null,
+                notice = null,
+            )
+        }
+        AssistantDraftStore.clear()
+        screenAssistantId = null
+
+        screenJob = viewModelScope.launch(Dispatchers.IO) {
+            var sessionId: String? = null
+            try {
+                val photo = ScreenCapture.encode(bitmap)
+                    ?: throw IllegalStateException("The screenshot is too large to send.")
+                val gateway = ensureClient(config)
+                val session = gateway.createSession(
+                    cwd = (activeCwd ?: config.cwd).takeIf { it.isNotBlank() },
+                    ephemeral = true,
+                )
+                sessionId = session.id
+                screenSessionId = session.id
+
+                val connected = CompletableDeferred<Unit>()
+                val collector = viewModelScope.async(Dispatchers.IO) {
+                    gateway.events(session.id, null, replay = true) {
+                        connected.complete(Unit)
+                    }.takeWhile { event ->
+                        val type = event.payload.optString("type")
+                        type != "agent_settled" && type != "gateway_exit"
+                    }.collect { handleScreenEvent(it) }
+                }
+                screenCollectorJob = collector
+                collector.invokeOnCompletion { cause ->
+                    if (cause != null) connected.completeExceptionally(cause)
+                }
+                try {
+                    withTimeout(10_000) { connected.await() }
+                } catch (error: TimeoutCancellationException) {
+                    collector.cancel()
+                    throw IllegalStateException("The screen query did not connect.")
+                } catch (error: Exception) {
+                    collector.cancel()
+                    throw error
+                }
+
+                gateway.prompt(
+                    sessionId = session.id,
+                    message = display,
+                    contextFiles = PromptContext.files(ScreenQuery.textFiles(attachments)),
+                    images = buildList {
+                        add(GatewayImage(photo.mimeType, photo.base64))
+                        ScreenQuery.photos(attachments).forEach {
+                            add(GatewayImage(it.mimeType, it.base64))
+                        }
+                    },
+                )
+                collector.await()
+                _state.update { it.copy(streaming = false) }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                _state.update {
+                    it.copy(
+                        streaming = false,
+                        error = error.message ?: "Screen query failed.",
+                    )
+                }
+            } finally {
+                val id = sessionId
+                if (id != null) {
+                    runCatching { client?.deleteSession(id) }
+                    if (screenSessionId == id) screenSessionId = null
+                }
+            }
+        }
+    }
+
+    fun removeScreenshot() {
+        ScreenshotStager.clear()
+    }
+
+    /** Close/hide/background: drop the transient screen answer and delete its ephemeral session. */
+    fun clearScreenQuery() {
+        val id = screenSessionId
+        val wasStreaming = screenJob?.isActive == true
+        screenSessionId = null
+        screenJob?.cancel()
+        screenJob = null
+        screenCollectorJob?.cancel()
+        screenCollectorJob = null
+        screenAssistantId = null
+        if (id != null || _state.value.screenQuery) {
+            _state.update {
+                it.copy(
+                    screenMessages = emptyList(),
+                    screenQuery = false,
+                    streaming = if (wasStreaming) false else it.streaming,
+                )
+            }
+        }
+        if (id != null) {
+            val gateway = client ?: return
+            viewModelScope.launch(Dispatchers.IO) {
+                runCatching { gateway.deleteSession(id) }
+            }
+        }
+    }
+
     fun abort() {
-        val sessionId = GatewaySessionStore.sessionId ?: return
+        val sessionId = screenSessionId ?: GatewaySessionStore.sessionId ?: return
         val gateway = client ?: return
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { gateway.abort(sessionId) }
@@ -306,6 +465,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun newSession() {
+        clearScreenQuery()
         viewModelScope.launch(Dispatchers.IO) {
             streamJob?.cancel()
             streamJob = null
@@ -370,6 +530,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         val config = settings.load()
         if (config.url.isBlank()) return
 
+        clearScreenQuery()
         streamJob?.cancel()
         streamJob = null
         capabilitiesJob?.cancel()
@@ -388,7 +549,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
                 val gateway = ensureClient(config)
-                gateway.session(sessionId)
+                val info = gateway.session(sessionId)
+                activeCwd = info.cwd.takeIf { it.isNotBlank() }
                 attach(gateway, sessionId)
             }.onFailure { error ->
                 _state.update {
@@ -406,6 +568,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     if (GatewaySessionStore.sessionId == sessionId) {
                         streamJob?.cancel()
                         streamJob = null
+                        clearScreenQuery()
                         GatewaySessionStore.reset()
                         _state.value = AssistantUiState()
                     }
@@ -483,6 +646,10 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     override fun onCleared() {
         streamJob?.cancel()
         streamJob = null
+        screenJob?.cancel()
+        screenJob = null
+        screenCollectorJob?.cancel()
+        screenCollectorJob = null
         capabilitiesJob?.cancel()
         capabilitiesJob = null
         dialogTimeoutJob?.cancel()
@@ -563,6 +730,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         GatewaySessionStore.sessionId = session.id
         GatewaySessionStore.lastEventId = null
         GatewaySessionStore.fingerprint = config.fingerprint
+        activeCwd = session.cwd.takeIf { it.isNotBlank() }
         _state.update { it.copy(sessionId = session.id) }
         return session
     }
@@ -631,6 +799,117 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         toolMessages.putAll(restored.toolMessageIds)
         activeAssistantId = restored.trailingAssistantId
         _state.update { it.copy(messages = restored.messages) }
+    }
+
+    /** Screen answers are transient: they never enter `messages`, the transcript, or the state file. */
+    private fun handleScreenEvent(event: GatewayEvent) {
+        val payload = event.payload
+        when (payload.optString("type")) {
+            "message_start" -> {
+                val message = payload.optJSONObject("message") ?: return
+                if (message.optString("role") != "assistant") return
+                val id = message.optString("id").ifBlank { UUID.randomUUID().toString() }
+                screenAssistantId = id
+                _state.update {
+                    it.copy(
+                        screenMessages = it.screenMessages + ChatMessage(
+                            id = id,
+                            role = ChatRole.Assistant,
+                            text = SessionTranscript.messageText(message),
+                        ),
+                    )
+                }
+            }
+            "message_update" -> {
+                val update = payload.optJSONObject("assistantMessageEvent") ?: return
+                when (update.optString("type")) {
+                    "text_delta" -> appendScreenText(update.optString("delta"))
+                    "text_end" -> replaceScreenText(update.optString("content"))
+                    "thinking_delta" -> appendScreenThinking(update.optString("delta"))
+                    "thinking_end" -> replaceScreenThinking(update.optString("content"))
+                }
+            }
+            "message_end" -> {
+                val message = payload.optJSONObject("message") ?: return
+                if (message.optString("role") != "assistant") return
+                val id = screenAssistantId
+                if (id != null) {
+                    finalizeScreenAssistant(
+                        id,
+                        SessionTranscript.messageText(message),
+                        SessionTranscript.messageThinking(message),
+                    )
+                }
+                screenAssistantId = null
+            }
+        }
+    }
+
+    private fun appendScreenText(delta: String) {
+        if (delta.isEmpty()) return
+        ensureScreenAssistant()
+        updateScreenAssistant { it.copy(text = it.text + delta) }
+    }
+
+    private fun appendScreenThinking(delta: String) {
+        if (delta.isEmpty()) return
+        ensureScreenAssistant()
+        updateScreenAssistant { it.copy(thinking = it.thinking + delta) }
+    }
+
+    private fun replaceScreenText(content: String) {
+        if (content.isEmpty()) return
+        ensureScreenAssistant()
+        updateScreenAssistant { it.copy(text = content) }
+    }
+
+    private fun replaceScreenThinking(content: String) {
+        if (content.isEmpty()) return
+        ensureScreenAssistant()
+        updateScreenAssistant { it.copy(thinking = content) }
+    }
+
+    private fun finalizeScreenAssistant(id: String, text: String, thinking: String) {
+        _state.update { state ->
+            state.copy(
+                screenMessages = state.screenMessages.map {
+                    if (it.id != id) {
+                        it
+                    } else {
+                        it.copy(
+                            text = text.ifEmpty { it.text },
+                            thinking = thinking.ifEmpty { it.thinking },
+                        )
+                    }
+                },
+            )
+        }
+    }
+
+    private fun ensureScreenAssistant() {
+        if (screenAssistantId != null) return
+        val id = UUID.randomUUID().toString()
+        screenAssistantId = id
+        _state.update {
+            it.copy(
+                screenMessages = it.screenMessages + ChatMessage(
+                    id = id,
+                    role = ChatRole.Assistant,
+                    text = "",
+                ),
+            )
+        }
+    }
+
+    private fun updateScreenAssistant(transform: (ChatMessage) -> ChatMessage) {
+        val id = screenAssistantId ?: return
+        _state.update { state ->
+            state.copy(
+                screenMessages = state.screenMessages.map {
+                    if (it.id == id) transform(it) else it
+                },
+            )
+        }
     }
 
     private fun handleEvent(event: GatewayEvent) {

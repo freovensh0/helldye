@@ -7,7 +7,7 @@
     android:supportsAssist="true"
     android:supportsLaunchVoiceAssistFromKeyguard="true"
     android:supportsLocalInteraction="true"
-    android:usesAssistData="true"
+    android:usesAssistData="false"
     android:usesAssistScreenshots="true"
     android:usesAssistStructureScreenContent="false"
     tools:targetApi="37" />
