@@ -642,6 +642,27 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun openDiff() {
+        val gateway = client ?: return
+        val sessionId = GatewaySessionStore.sessionId ?: return
+        _state.update { it.copy(diffOpen = true, diffLoading = true, diffError = null) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching { gateway.diff(sessionId) }
+            if (GatewaySessionStore.sessionId != sessionId) return@launch
+            _state.update {
+                it.copy(
+                    diffLoading = false,
+                    diff = result.getOrNull() ?: it.diff,
+                    diffError = result.exceptionOrNull()?.message,
+                )
+            }
+        }
+    }
+
+    fun closeDiff() {
+        _state.update { it.copy(diffOpen = false) }
+    }
+
     fun importSessions() {
         val config = settings.load()
         if (config.url.isBlank()) {

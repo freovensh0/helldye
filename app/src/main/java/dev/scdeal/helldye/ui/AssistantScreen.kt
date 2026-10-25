@@ -39,6 +39,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -96,6 +97,7 @@ import dev.scdeal.helldye.assistant.SlashCommands
 import dev.scdeal.helldye.assistant.ToolInfo
 import dev.scdeal.helldye.assistant.ToolSummary
 import dev.scdeal.helldye.assistant.UsageSummary
+import dev.scdeal.helldye.gateway.GatewayDiff
 import dev.scdeal.helldye.gateway.GatewayModel
 import dev.scdeal.helldye.gateway.GatewaySession
 import dev.scdeal.helldye.ui.components.Hairline
@@ -147,6 +149,8 @@ fun AssistantScreen(
     onRenameSession: (String, String) -> Unit,
     onLoadOlder: () -> Unit,
     onImportSessions: () -> Unit,
+    onOpenDiff: () -> Unit,
+    onCloseDiff: () -> Unit,
     onExpand: (() -> Unit)?,
     onClose: () -> Unit,
 ) {
@@ -490,8 +494,18 @@ fun AssistantScreen(
             OverflowMenu(
                 onOpenSessions = onOpenSessions,
                 onOpenSettings = onOpenSettings,
+                onOpenDiff = onOpenDiff,
                 onExpand = onExpand,
                 onDismiss = { overflowOpen = false },
+            )
+        }
+
+        if (state.diffOpen) {
+            DiffSheet(
+                diff = state.diff,
+                loading = state.diffLoading,
+                error = state.diffError,
+                onClose = onCloseDiff,
             )
         }
 
@@ -623,6 +637,7 @@ private fun TopRail(
 private fun OverflowMenu(
     onOpenSessions: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenDiff: () -> Unit,
     onExpand: (() -> Unit)?,
     onDismiss: () -> Unit,
 ) {
@@ -648,6 +663,11 @@ private fun OverflowMenu(
             OverflowRow("SETTINGS") {
                 onDismiss()
                 onOpenSettings()
+            }
+            Hairline(color = HelldyeColors.LineSoft)
+            OverflowRow("DIFF") {
+                onDismiss()
+                onOpenDiff()
             }
             if (onExpand != null) {
                 Hairline(color = HelldyeColors.LineSoft)
@@ -1334,6 +1354,137 @@ private fun SlashPalette(
                 )
             }
             Hairline(color = HelldyeColors.LineSoft)
+        }
+    }
+}
+
+@Composable
+private fun DiffSheet(
+    diff: GatewayDiff?,
+    loading: Boolean,
+    error: String?,
+    onClose: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.72f)),
+        contentAlignment = Alignment.BottomCenter,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.9f)
+                .background(
+                    color = HelldyeColors.Black,
+                    shape = RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp),
+                )
+                .border(1.dp, HelldyeColors.Line, RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp))
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .padding(horizontal = HelldyeDimens.ScreenPadding),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(HelldyeDimens.TopBar),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SectionLabel("WORKSPACE DIFF")
+                Spacer(Modifier.weight(1f))
+                TextButton(
+                    onClick = onClose,
+                    modifier = Modifier.heightIn(min = HelldyeDimens.TouchTarget),
+                ) {
+                    Text(
+                        text = "CLOSE",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = HelldyeColors.TextSecondary,
+                    )
+                }
+            }
+            Hairline(color = HelldyeColors.LineSoft)
+            val current = diff
+            when {
+                loading && current == null -> Text(
+                    text = "LOADING",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = HelldyeColors.TextMuted,
+                    modifier = Modifier.padding(vertical = HelldyeDimens.Lg),
+                )
+                current == null -> Text(
+                    text = error ?: "No changes.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (error != null) HelldyeColors.Signal else HelldyeColors.TextMuted,
+                    modifier = Modifier.padding(vertical = HelldyeDimens.Lg),
+                )
+                else -> {
+                    val additions = current.files.sumOf { it.additions }
+                    val deletions = current.files.sumOf { it.deletions }
+                    Text(
+                        text = "${current.files.size} FILES · +$additions −$deletions",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = HelldyeColors.TextMuted,
+                        modifier = Modifier.padding(top = HelldyeDimens.Sm),
+                    )
+                    if (current.truncated) {
+                        Text(
+                            text = "Diff truncated at 200 KB.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = HelldyeColors.TextMuted,
+                        )
+                    }
+                    if (error != null) {
+                        Text(
+                            text = error,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = HelldyeColors.Signal,
+                        )
+                    }
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .verticalScroll(rememberScrollState()),
+                    ) {
+                        current.files.forEach { file ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = HelldyeDimens.Xs),
+                            ) {
+                                Text(
+                                    text = file.path,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = HelldyeColors.Text,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Text(
+                                    text = if (file.binary) {
+                                        "BINARY"
+                                    } else {
+                                        "+${file.additions} −${file.deletions}"
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = HelldyeColors.TextMuted,
+                                )
+                            }
+                        }
+                        if (current.text.isNotEmpty()) {
+                            Spacer(Modifier.height(HelldyeDimens.Sm))
+                            Hairline(color = HelldyeColors.LineSoft)
+                            Spacer(Modifier.height(HelldyeDimens.Sm))
+                            Text(
+                                text = current.text,
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontFamily = dev.scdeal.helldye.ui.theme.JetBrainsMono,
+                                ),
+                                color = HelldyeColors.TextSecondary,
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -2304,6 +2455,8 @@ private fun AssistantScreenPreview() {
             onRenameSession = { _, _ -> },
             onLoadOlder = {},
             onImportSessions = {},
+            onOpenDiff = {},
+            onCloseDiff = {},
             onExpand = {},
             onClose = {},
         )

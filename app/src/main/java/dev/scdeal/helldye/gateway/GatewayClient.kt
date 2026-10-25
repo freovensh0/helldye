@@ -75,6 +75,20 @@ data class GatewayState(
     val epoch: String? = null,
 )
 
+data class GatewayDiffFile(
+    val path: String,
+    val additions: Long,
+    val deletions: Long,
+    val binary: Boolean,
+    val untracked: Boolean,
+)
+
+data class GatewayDiff(
+    val files: List<GatewayDiffFile>,
+    val text: String,
+    val truncated: Boolean,
+)
+
 /** Pi transcript plus the event cursor it reflects, so the client can resume the stream without duplicates. */
 data class GatewayTranscript(
     val messages: JSONArray,
@@ -161,6 +175,37 @@ class GatewayClient(private val config: GatewayConfig) {
 
     fun deleteSession(sessionId: String) {
         request("DELETE", "/sessions/$sessionId")
+    }
+
+    fun diff(sessionId: String): GatewayDiff {
+        val response = request("GET", "/sessions/$sessionId/diff")
+        val array = response.optJSONArray("files") ?: JSONArray()
+        return GatewayDiff(
+            files = buildList {
+                for (index in 0 until array.length()) {
+                    val file = array.optJSONObject(index) ?: continue
+                    add(
+                        GatewayDiffFile(
+                            path = file.optString("path"),
+                            additions = file.optLong("additions"),
+                            deletions = file.optLong("deletions"),
+                            binary = file.optBoolean("binary"),
+                            untracked = file.optBoolean("untracked"),
+                        ),
+                    )
+                }
+            },
+            text = response.optString("diff"),
+            truncated = response.optBoolean("truncated"),
+        )
+    }
+
+    fun setAllowEdits(sessionId: String, enabled: Boolean) {
+        request(
+            "POST",
+            "/sessions/$sessionId/allow_edits",
+            JSONObject().put("enabled", enabled),
+        )
     }
 
     fun sessions(): List<GatewaySession> = sessionArray(requestArray("GET", "/sessions"))

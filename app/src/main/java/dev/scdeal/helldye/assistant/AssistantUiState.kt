@@ -1,6 +1,7 @@
 package dev.scdeal.helldye.assistant
 
 import dev.scdeal.helldye.gateway.GatewayCommand
+import dev.scdeal.helldye.gateway.GatewayDiff
 import dev.scdeal.helldye.gateway.GatewayModel
 import dev.scdeal.helldye.gateway.GatewaySession
 import dev.scdeal.helldye.gateway.GatewayStats
@@ -73,6 +74,10 @@ data class AssistantUiState(
     val compacting: Boolean = false,
     val hasOlder: Boolean = false,
     val loadingOlder: Boolean = false,
+    val diffOpen: Boolean = false,
+    val diffLoading: Boolean = false,
+    val diff: GatewayDiff? = null,
+    val diffError: String? = null,
     val sessions: List<GatewaySession> = emptyList(),
     val sessionsOpen: Boolean = false,
     val sessionsLoading: Boolean = false,

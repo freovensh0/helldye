@@ -129,6 +129,8 @@ abstract class AssistantHostActivity : ComponentActivity() {
             onRenameSession = viewModel::renameSession,
             onLoadOlder = viewModel::loadOlder,
             onImportSessions = viewModel::importSessions,
+            onOpenDiff = viewModel::openDiff,
+            onCloseDiff = viewModel::closeDiff,
             onExpand = expandAction,
             onClose = { finish() },
         )
