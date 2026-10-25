@@ -57,6 +57,11 @@ never a command-line argument, and never enters the Pi child environment.
 | `GET` | `/v1/sessions/{id}/thinking` | — | `200` Pi `get_available_thinking_levels` data |
 | `POST` | `/v1/sessions/{id}/thinking` | `{level}` | `200` Pi `set_thinking_level` data |
 | `POST` | `/v1/sessions/{id}/extension_ui_response` | `{id, value?, confirmed?, cancelled?}` | `200` `{accepted:true}` |
+| `GET` | `/v1/sessions/{id}/diff` | — | `200` `{files, diff, truncated}` |
+| `GET` | `/v1/sessions/{id}/file` | `?path=relative` | `200` `{path, content, lines}` |
+| `GET` | `/v1/sessions/{id}/worktrees` | — | `200` `{worktrees}` |
+| `POST` | `/v1/sessions/{id}/worktrees` | `{branch, path}` | `200` `{path, branch}` |
+| `POST` | `/v1/sessions/{id}/allow_edits` | `{enabled}` | `200` `{allowEdits}` |
 
 ### 2.1 Session shape
 
@@ -184,6 +189,24 @@ trailing partial lines, and validates the `cwd` against `HELLDYE_WORKSPACES`. Va
 reappear until imported again. No Pi process is started and no transcript is read into the response.
 If the env var is unset or not a directory the route returns `400`.
 
+### 2.5.2 Coding surface
+
+All routes are read-only except worktree creation and the per-session tool gate.
+
+- `GET /diff` runs `git diff HEAD --no-color` (falling back to `git diff` before the first commit)
+  in the session `cwd`, adds up to 20 untracked files to `files`, and returns a diff capped at 200 KB
+  with `truncated`. `files` entries are `{path, additions, deletions, binary, untracked?}`.
+- `GET /file?path=` serves UTF-8 text inside the session `cwd` only. Absolute paths, `..`, symlink
+  escapes outside the workspace, non-files, files over 512 KB, and non-UTF-8 content are rejected.
+- `GET /worktrees` parses `git worktree list --porcelain`. `POST /worktrees` validates the branch
+  (no leading `-`, no `..`, `[A-Za-z0-9._/-]` only) and an absolute destination whose parent is inside
+  `HELLDYE_WORKSPACES`, then runs `git worktree add <path> -b <branch>` with fixed argv. There is no
+  delete route. Switch worktrees by creating a session with the worktree path as `cwd`.
+- `POST /allow_edits` is per session and only while stopped (`409` otherwise). Enabling requires
+  `HELLDYE_ACTION_TOOLS`; the override is persisted and applies the next time Pi starts for that
+  session. Disabling returns it to `HELLDYE_TOOLS`. Ephemeral sessions are always read-only. Each
+  toggle is audited on stderr without prompt content.
+
 ### 2.6 Rename
 
 `name` is trimmed; empty is `400 name is empty`. This is the only route that changes a name and it
@@ -263,8 +286,9 @@ Error bodies are plain text, not JSON. Empty bodies are possible.
 | `401` | Missing or wrong token. |
 | `404` | Session id not found, unknown path. |
 | `405` | Known path, wrong method. |
-| `413` | Request body over 12 MiB, more than four images, an image over 1.5 MB or 6 MB total, or an image whose long edge exceeds 1,568 px. |
-| `415` | Unsupported image MIME type, invalid base64, or bytes that do not match the declared image type. |
+| `409` | Worktree destination exists, or tools change requested while the session is running. |
+| `413` | Request body over 12 MiB, more than four images, an image over 1.5 MB or 6 MB total, an image whose long edge exceeds 1,568 px, or a file peek over 512 KB. |
+| `415` | Unsupported image MIME type, invalid base64, bytes that do not match the declared image type, or a non-UTF-8 file peek. |
 | `422` | JSON body parsed but a required field has the wrong type. |
 | `502` | Pi failed to start, stdin is closed, a Pi command failed, or a Pi command timed out (10–15 s). |
 
