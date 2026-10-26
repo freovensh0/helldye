@@ -91,6 +91,11 @@ hellgate restart
 This gives the agent shell and write access on the gateway host. `hellgate tools reset` clears the
 override and returns to the read-only default.
 
+The app's model sheet also has a per-session **FILE EDITS** toggle. It stops Pi for that session,
+applies the gateway's action-tool set, and the next prompt resumes it. The action set comes from
+`~/helldye-gateway/action-tools` when present, otherwise the write set (`read,bash,edit,write,grep,find,ls`),
+or `*` when the global tools file is `*`. A running turn must finish before the toggle can change.
+
 ## Build
 
 The Android build and every later build run on GitHub Actions. There is no local Android SDK on the

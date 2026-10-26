@@ -372,7 +372,7 @@ Exit gate:
 - [ ] A turn that edits files shows a diff and changed-file summary.
 - [ ] A binary or huge file does not freeze the UI.
 - [ ] Worktree creation cannot escape the workspace or destroy uncommitted work.
-- [ ] "Allow edits" is off by default and scoped to one session.
+- [x] "Allow edits" is off by default and scoped to one session.
 - [ ] Every coding action has a cancel path and a visible failure state.
 
 Do not build: an editor, terminal, GitHub PR review, auto-commit, auto-push, or a file browser for

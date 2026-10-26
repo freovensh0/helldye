@@ -458,6 +458,44 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    /** Stops Pi, applies the gateway's action-tool override, and resumes on the next prompt. */
+    fun setAllowEdits(enabled: Boolean) {
+        val sessionId = GatewaySessionStore.sessionId ?: return
+        val gateway = client ?: return
+        val current = _state.value
+        if (current.editsBusy) return
+        if (current.streaming || current.stopping) {
+            _state.update {
+                it.copy(
+                    notice = "Stop the active run before changing edits.",
+                    noticeTone = NoticeTone.Info,
+                )
+            }
+            return
+        }
+        _state.update { it.copy(editsBusy = true) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                gateway.stopSession(sessionId)
+                gateway.setAllowEdits(sessionId, enabled)
+            }
+            if (GatewaySessionStore.sessionId != sessionId) return@launch
+            result
+                .onSuccess { allowed ->
+                    _state.update { it.copy(allowEdits = allowed, editsBusy = false) }
+                }
+                .onFailure { error ->
+                    _state.update {
+                        it.copy(
+                            editsBusy = false,
+                            notice = error.message ?: "Could not change tool permissions.",
+                            noticeTone = NoticeTone.Error,
+                        )
+                    }
+                }
+        }
+    }
+
     fun openModelPicker() {
         val config = settings.load()
         if (config.url.isBlank()) {
@@ -925,6 +963,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                         thinkingLevel = snapshot.thinkingLevel ?: state.thinkingLevel,
                         streaming = state.streaming || snapshot.busy || snapshot.stopping,
                         stopping = snapshot.stopping,
+                        allowEdits = snapshot.allowEdits,
                     )
                 }
             }
@@ -944,6 +983,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     commands = commands.getOrElse { state.commands },
                     currentModel = snapshot?.model ?: state.currentModel,
                     thinkingLevel = snapshot?.thinkingLevel ?: state.thinkingLevel,
+                    allowEdits = snapshot?.allowEdits ?: state.allowEdits,
                     thinkingLevels = levels.getOrElse { state.thinkingLevels }
                         .ifEmpty { FALLBACK_THINKING_LEVELS },
                     stats = stats.getOrElse { state.stats },
@@ -1069,6 +1109,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 it.copy(
                     streaming = it.streaming || snapshot.busy || snapshot.stopping,
                     stopping = snapshot.stopping,
+                    allowEdits = snapshot.allowEdits,
                 )
             }
         }

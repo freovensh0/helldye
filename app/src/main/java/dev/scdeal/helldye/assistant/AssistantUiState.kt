@@ -55,6 +55,10 @@ data class AssistantUiState(
     val streaming: Boolean = false,
     /** Abort accepted by the gateway, not yet settled. */
     val stopping: Boolean = false,
+    /** The gateway's per-session action-tool override is active. */
+    val allowEdits: Boolean = false,
+    /** A stop + allow_edits request is in flight. */
+    val editsBusy: Boolean = false,
     /** Device has no default network. Drafts are preserved; nothing is auto-sent. */
     val offline: Boolean = false,
     val notice: String? = null,

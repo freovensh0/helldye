@@ -161,6 +161,9 @@ struct SessionInfo {
     /// Imported from the host's Pi session directory; not created by the phone.
     #[serde(rename = "onHost")]
     on_host: bool,
+    /// The operator allowed action tools for this session (per-session override).
+    #[serde(rename = "allowEdits")]
+    allow_edits: bool,
     created: u64,
 }
 
@@ -371,6 +374,7 @@ impl Session {
             started,
             busy,
             on_host: self.on_host.load(Ordering::SeqCst),
+            allow_edits: self.tools_override.lock().await.is_some(),
             created: self.created,
         }
     }
@@ -466,6 +470,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/sessions/{id}/prompt", post(prompt))
         .route("/v1/sessions/{id}/abort", post(abort))
         .route("/v1/sessions/{id}/compact", post(compact))
+        .route("/v1/sessions/{id}/stop", post(stop_session))
         .route("/v1/sessions/{id}/name", post(rename_session))
         .route("/v1/sessions/{id}/models", get(session_models))
         .route("/v1/sessions/{id}/commands", get(session_commands))
@@ -1127,6 +1132,23 @@ async fn compact(
     Ok(Json(json!({ "accepted": true })))
 }
 
+/// Closes Pi's stdin while keeping the session record. The next prompt resumes it, with fresh
+/// per-session tool permissions. A running turn must be aborted first.
+async fn stop_session(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let session = lookup_owned(&state, &id).await?;
+    if session.streaming.load(Ordering::SeqCst) {
+        return Err((StatusCode::CONFLICT, "stop the active run first".into()));
+    }
+    let stopped = session.stdin.lock().await.take().is_some();
+    if stopped {
+        *session.status.lock().await = "stopped".into();
+    }
+    Ok(Json(json!({ "stopped": stopped })))
+}
+
 async fn rename_session(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -1617,6 +1639,7 @@ async fn session_state(
         "lastEventId": session.seq.load(Ordering::SeqCst).to_string(),
         "epoch": state.epoch,
         "created": info.created,
+        "allowEdits": info.allow_edits,
     });
     if info.started {
         if let Ok(response) = session
@@ -3161,6 +3184,66 @@ mod tests {
 
         session.stdin.lock().await.take();
         tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_closes_pi_and_keeps_the_session_record() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = FAKE_PI_LOCK.lock().await;
+        let dir = temp_dir("stop-session");
+        let workspace = dir.join("ws");
+        fs::create_dir_all(&workspace).unwrap();
+        let script = dir.join("pi");
+        fs::write(&script, "#!/bin/sh\nread -r line || true\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let state = super::AppState {
+            pi_bin: script.to_string_lossy().into_owned(),
+            tools: "read".into(),
+            token: "secret".into(),
+            workspaces: std::sync::Arc::new(vec![workspace.canonicalize().unwrap()]),
+            debug_stderr: false,
+            sessions: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            state_file: dir.join("sessions.json"),
+            epoch: "test-epoch".into(),
+            idle_secs: 0,
+            state_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        };
+        let session = super::new_session(
+            "12345678-eeee".into(),
+            "Session 12345678".into(),
+            workspace.canonicalize().unwrap(),
+            super::now_epoch(),
+            false,
+            false,
+        );
+        state
+            .sessions
+            .write()
+            .await
+            .insert(session.id.clone(), session.clone());
+        *session.tools_override.lock().await = Some("edit".into());
+
+        let Json(value) = super::session_state(State(state.clone()), AxumPath(session.id.clone()))
+            .await
+            .unwrap();
+        assert_eq!(value["allowEdits"], true);
+
+        super::ensure_started(&state, &session).await.unwrap();
+        let Json(value) = super::stop_session(State(state.clone()), AxumPath(session.id.clone()))
+            .await
+            .unwrap();
+        assert_eq!(value["stopped"], true);
+        assert!(session.stdin.lock().await.is_none());
+        assert!(state.sessions.read().await.contains_key(&session.id));
+
+        let Json(value) = super::stop_session(State(state), AxumPath(session.id.clone()))
+            .await
+            .unwrap();
+        assert_eq!(value["stopped"], false);
         let _ = fs::remove_dir_all(&dir);
     }
 
