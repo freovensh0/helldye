@@ -58,6 +58,9 @@ not evidence that the project builds. A change is verified only by a green run o
   `pi-gateway` over HTTPS/SSE. Do not spawn Pi inside the APK.
 - One Pi session has one writer. The gateway owns session lifetime and event replay. The client may
   detach and reattach without aborting a run.
+- Fork and clone are out of scope permanently (operator decision, 2026-10-26). Do not implement them,
+  add UI or endpoints for them, or ask the operator about them again; the capability flags stay
+  `false`.
 - Removing a session is "remove from list": it deletes the gateway record only. The Pi transcript stays
   on the host. "Purge on host" is a manual host operation, never a phone action. Never claim a session
   or its transcript was deleted from the phone.
