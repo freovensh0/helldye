@@ -439,7 +439,10 @@ class GatewayClient(private val config: GatewayConfig) {
     ): Flow<GatewayEvent> = callbackFlow {
         val path = "/sessions/$sessionId/events" + if (replay) "" else "?replay=false"
         val connection = openConnection(path, "GET").apply {
-            readTimeout = 0
+            // The gateway sends an SSE keep-alive every 15s. A longer read deadline turns a silently
+            // dead mobile connection into an exception, so the stream job reconnects instead of
+            // staying "THINKING" forever.
+            readTimeout = 45_000
             setRequestProperty("Accept", "text/event-stream")
             if (!lastEventId.isNullOrBlank()) setRequestProperty("Last-Event-ID", lastEventId)
         }
