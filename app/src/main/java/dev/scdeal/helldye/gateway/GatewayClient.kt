@@ -255,14 +255,6 @@ class GatewayClient(private val config: GatewayConfig) {
 
     fun exportHtml(sessionId: String): String = requestText("GET", "/sessions/$sessionId/export")
 
-    fun setAllowEdits(sessionId: String, enabled: Boolean) {
-        request(
-            "POST",
-            "/sessions/$sessionId/allow_edits",
-            JSONObject().put("enabled", enabled),
-        )
-    }
-
     fun sessions(): List<GatewaySession> = sessionArray(requestArray("GET", "/sessions"))
 
     /** Explicit host import; the gateway scans `HELLDYE_PI_SESSION_DIR` without spawning Pi. */
