@@ -55,6 +55,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     private var activeCwd: String? = null
     private var capabilitiesJob: Job? = null
     private var capabilitiesSessionId: String? = null
+    @Volatile
+    private var capabilitiesRun = 0
     private var activeAssistantId: String? = null
     private val toolMessages = mutableMapOf<String, String>()
     private val pendingUserEchoes = ConcurrentLinkedQueue<String>()
@@ -197,9 +199,12 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         }
 
         viewModelScope.launch(Dispatchers.IO) {
+            var targetId = GatewaySessionStore.sessionId
             try {
                 val gateway = ensureClient(config)
+                targetId = GatewaySessionStore.sessionId
                 val session = ensureSession(gateway, config)
+                targetId = session.id
                 gateway.prompt(
                     sessionId = session.id,
                     message = prompt.ifBlank { "Use the attached context." },
@@ -208,10 +213,14 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                         GatewayImage(it.mimeType, it.base64)
                     },
                 )
+                // The session may have changed while the prompt was in flight. The accepted turn
+                // still belongs to the old session; do not hijack the new one's stream.
+                if (GatewaySessionStore.sessionId != session.id) return@launch
                 // The gateway buffers events, so subscribing after acceptance cannot lose a turn.
                 startStream(gateway, session.id)
                 refreshCapabilities(gateway, session.id, announce = false)
             } catch (error: Exception) {
+                val stillCurrent = GatewaySessionStore.sessionId == targetId
                 if (error is GatewayException && error.message?.contains("HTTP 404") == true) {
                     GatewaySessionStore.reset()
                     streamJob?.cancel()
@@ -219,6 +228,14 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 }
                 pendingUserEchoes.clear()
                 settings.clearPendingSubmit()
+                if (!stillCurrent) {
+                    // Keep the unsent text for the session that owns it, without touching the
+                    // session the operator switched to.
+                    if (targetId != null && prompt.isNotBlank()) {
+                        settings.saveDraft(targetId, prompt)
+                    }
+                    return@launch
+                }
                 // Roll the optimistic turn back and keep the draft: nothing was delivered.
                 AssistantDraftStore.attachments = attachments
                 _state.update {
@@ -424,10 +441,16 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { gateway.abort(sessionId) }
                 .onSuccess {
+                    if (sessionId != screenSessionId && sessionId != GatewaySessionStore.sessionId) {
+                        return@onSuccess
+                    }
                     // Keep STOPPING visible until the gateway settles the turn.
                     _state.update { it.copy(stopping = true) }
                 }
                 .onFailure { error ->
+                    if (sessionId != screenSessionId && sessionId != GatewaySessionStore.sessionId) {
+                        return@onFailure
+                    }
                     _state.update {
                         it.copy(error = error.message ?: "Could not stop the turn.")
                     }
@@ -446,15 +469,16 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             )
         }
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { gateway.compact(sessionId) }
-                .onFailure { error ->
-                    _state.update {
-                        it.copy(
-                            compacting = false,
-                            error = error.message ?: "Compaction failed.",
-                        )
-                    }
+            val result = runCatching { gateway.compact(sessionId) }
+            if (GatewaySessionStore.sessionId != sessionId) return@launch
+            result.onFailure { error ->
+                _state.update {
+                    it.copy(
+                        compacting = false,
+                        error = error.message ?: "Compaction failed.",
+                    )
                 }
+            }
         }
     }
 
@@ -502,14 +526,19 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             notice("Configure the Pi gateway in Settings first.")
             return
         }
+        val expectedSession = GatewaySessionStore.sessionId
         _state.update { it.copy(modelPickerOpen = true) }
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val gateway = ensureClient(config)
                 val session = ensureSession(gateway, config)
+                if (GatewaySessionStore.sessionId != session.id) return@launch
                 startStream(gateway, session.id)
-                refreshCapabilities(gateway, session.id, announce = true)
+                // Opening the picker is an explicit action, so a stopped session may start Pi here
+                // to ask it for the model list.
+                refreshCapabilities(gateway, session.id, announce = true, start = true)
             } catch (error: Exception) {
+                if (GatewaySessionStore.sessionId != expectedSession) return@launch
                 _state.update {
                     it.copy(
                         modelPickerOpen = false,
@@ -530,15 +559,18 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             notice("Configure the Pi gateway in Settings first.")
             return
         }
+        val expectedSession = GatewaySessionStore.sessionId
         _state.update { it.copy(thinkingPickerOpen = true, capabilitiesLoading = true) }
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val gateway = ensureClient(config)
                 val session = ensureSession(gateway, config)
+                if (GatewaySessionStore.sessionId != session.id) return@launch
                 startStream(gateway, session.id)
                 val levels = runCatching { gateway.thinkingLevels(session.id) }
                     .getOrElse { emptyList() }
                 val sessionState = runCatching { gateway.state(session.id) }
+                if (GatewaySessionStore.sessionId != session.id) return@launch
                 _state.update {
                     it.copy(
                         thinkingLevels = levels.ifEmpty { FALLBACK_THINKING_LEVELS },
@@ -547,6 +579,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     )
                 }
             } catch (error: Exception) {
+                if (GatewaySessionStore.sessionId != expectedSession) return@launch
                 _state.update {
                     it.copy(
                         thinkingPickerOpen = false,
@@ -602,20 +635,20 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     fun selectThinking(level: String) {
         val sessionId = GatewaySessionStore.sessionId ?: return
         val gateway = client ?: return
+        val previous = _state.value.thinkingLevel
+        // Dismiss and show the choice immediately; roll it back if the gateway rejects it.
+        _state.update {
+            it.copy(thinkingLevel = level, thinkingPickerOpen = false, error = null)
+        }
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { gateway.setThinkingLevel(sessionId, level) }
-                .onSuccess {
+                .onFailure { error ->
+                    if (GatewaySessionStore.sessionId != sessionId) return@onFailure
                     _state.update {
                         it.copy(
-                            thinkingLevel = level,
-                            thinkingPickerOpen = false,
-                            error = null,
+                            thinkingLevel = previous,
+                            error = error.message ?: "Could not set the thinking level.",
                         )
-                    }
-                }
-                .onFailure { error ->
-                    _state.update {
-                        it.copy(error = error.message ?: "Could not set the thinking level.")
                     }
                 }
         }
@@ -624,17 +657,17 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     fun selectModel(model: GatewayModel) {
         val sessionId = GatewaySessionStore.sessionId ?: return
         val gateway = client ?: return
+        val previous = _state.value.currentModel
+        // Dismiss and show the choice immediately; roll it back if the gateway rejects it.
+        _state.update {
+            it.copy(currentModel = model, modelPickerOpen = false, error = null)
+        }
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { gateway.setModel(sessionId, model) }
                 .onSuccess {
-                    _state.update {
-                        it.copy(
-                            currentModel = model,
-                            modelPickerOpen = false,
-                            error = null,
-                        )
-                    }
+                    if (GatewaySessionStore.sessionId != sessionId) return@onSuccess
                     runCatching { gateway.state(sessionId) }.onSuccess { sessionState ->
+                        if (GatewaySessionStore.sessionId != sessionId) return@onSuccess
                         _state.update {
                             it.copy(
                                 currentModel = sessionState.model ?: it.currentModel,
@@ -643,34 +676,43 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                         }
                     }
                     runCatching { gateway.thinkingLevels(sessionId) }.onSuccess { levels ->
+                        if (GatewaySessionStore.sessionId != sessionId) return@onSuccess
                         _state.update { it.copy(thinkingLevels = levels) }
                     }
                 }
                 .onFailure { error ->
+                    if (GatewaySessionStore.sessionId != sessionId) return@onFailure
                     _state.update {
-                        it.copy(error = error.message ?: "Could not switch models.")
+                        it.copy(
+                            currentModel = previous,
+                            error = error.message ?: "Could not switch models.",
+                        )
                     }
                 }
         }
     }
 
     fun newSession() {
+        val config = settings.load()
+        if (config.url.isBlank()) {
+            notice("Configure the Pi gateway in Settings first.")
+            return
+        }
         clearScreenQuery()
-        viewModelScope.launch(Dispatchers.IO) {
-            streamJob?.cancel()
-            streamJob = null
-            capabilitiesJob?.cancel()
-            capabilitiesJob = null
-            capabilitiesSessionId = null
-            GatewaySessionStore.reset()
-            client = null
-            toolMessages.clear()
-            pendingUserEchoes.clear()
-            AssistantDraftStore.clear()
-            _state.value = AssistantUiState()
+        streamJob?.cancel()
+        streamJob = null
+        capabilitiesJob?.cancel()
+        capabilitiesJob = null
+        capabilitiesSessionId = null
+        GatewaySessionStore.reset()
+        client = null
+        toolMessages.clear()
+        pendingUserEchoes.clear()
+        AssistantDraftStore.clear()
+        // Clear synchronously so the tap responds before the gateway round trip.
+        _state.value = AssistantUiState()
 
-            val config = settings.load()
-            if (config.url.isBlank()) return@launch
+        viewModelScope.launch(Dispatchers.IO) {
             runCatching {
                 val gateway = ensureClient(config)
                 val session = ensureSession(gateway, config)
@@ -798,7 +840,9 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         val gateway = client ?: return
         val sessionId = GatewaySessionStore.sessionId ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { gateway.exportHtml(sessionId) }
+            val result = runCatching { gateway.exportHtml(sessionId) }
+            if (GatewaySessionStore.sessionId != sessionId) return@launch
+            result
                 .onSuccess { html -> _state.update { it.copy(exportHtml = html) } }
                 .onFailure { error ->
                     _state.update {
@@ -947,14 +991,18 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         gateway: GatewayClient,
         sessionId: String,
         announce: Boolean,
+        start: Boolean = false,
     ) {
-        if (capabilitiesJob?.isActive == true) return
         if (!announce && capabilitiesSessionId == sessionId) return
         capabilitiesSessionId = sessionId
+        capabilitiesJob?.cancel()
+        val run = ++capabilitiesRun
         capabilitiesJob = viewModelScope.launch(Dispatchers.IO) {
+            if (capabilitiesRun != run) return@launch
             _state.update { it.copy(capabilitiesLoading = true) }
             // Read gateway state first; every capability route below needs a live Pi child.
             val snapshot = runCatching { gateway.state(sessionId) }.getOrNull()
+            if (capabilitiesRun != run || GatewaySessionStore.sessionId != sessionId) return@launch
             if (snapshot != null) {
                 GatewaySessionStore.epoch = snapshot.epoch ?: GatewaySessionStore.epoch
                 _state.update { state ->
@@ -967,8 +1015,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     )
                 }
             }
-            if (snapshot?.started != true) {
-                // Opening a stopped session must not spawn Pi. A later prompt retries.
+            if (snapshot?.started != true && !start) {
+                // Viewing a stopped session must not spawn Pi. A later prompt or picker retries.
                 capabilitiesSessionId = null
                 _state.update { it.copy(capabilitiesLoading = false) }
                 return@launch
@@ -977,13 +1025,22 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             val commands = runCatching { gateway.commands(sessionId) }
             val stats = runCatching { gateway.stats(sessionId) }
             val levels = runCatching { gateway.thinkingLevels(sessionId) }
+            // Asking for models starts a stopped Pi. Read its state again so the picker marks the
+            // active model instead of showing every row as inactive.
+            val current = if (start && snapshot?.started != true) {
+                runCatching { gateway.state(sessionId) }.getOrNull()
+            } else {
+                snapshot
+            }
+            if (capabilitiesRun != run || GatewaySessionStore.sessionId != sessionId) return@launch
+            if (models.isFailure) capabilitiesSessionId = null
             _state.update { state ->
                 state.copy(
                     models = models.getOrElse { state.models },
                     commands = commands.getOrElse { state.commands },
-                    currentModel = snapshot?.model ?: state.currentModel,
-                    thinkingLevel = snapshot?.thinkingLevel ?: state.thinkingLevel,
-                    allowEdits = snapshot?.allowEdits ?: state.allowEdits,
+                    currentModel = current?.model ?: state.currentModel,
+                    thinkingLevel = current?.thinkingLevel ?: state.thinkingLevel,
+                    allowEdits = current?.allowEdits ?: state.allowEdits,
                     thinkingLevels = levels.getOrElse { state.thinkingLevels }
                         .ifEmpty { FALLBACK_THINKING_LEVELS },
                     stats = stats.getOrElse { state.stats },
@@ -1002,8 +1059,9 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         val gateway = client ?: return
         val sessionId = GatewaySessionStore.sessionId ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { gateway.stats(sessionId) }
-                .onSuccess { stats -> _state.update { it.copy(stats = stats) } }
+            val stats = runCatching { gateway.stats(sessionId) }.getOrNull() ?: return@launch
+            if (GatewaySessionStore.sessionId != sessionId) return@launch
+            _state.update { it.copy(stats = stats) }
         }
     }
 
@@ -1047,10 +1105,15 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         sessionId: String,
         skipReplay: Boolean = false,
     ) {
-        if (streamJob?.isActive == true) return
+        if (GatewaySessionStore.sessionId != sessionId) return
+        // Replace any old subscription instead of ignoring the request. A job that just received
+        // `not_started` can still be active for a moment; returning early there would drop the
+        // stream for a prompt that was accepted at the same time.
+        streamJob?.cancel()
         streamJob = viewModelScope.launch(Dispatchers.IO) {
             var skip = skipReplay
             while (isActive) {
+                if (GatewaySessionStore.sessionId != sessionId) return@launch
                 var notStarted = false
                 try {
                     gateway.events(
@@ -1070,10 +1133,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                         event.id?.let { GatewaySessionStore.lastEventId = it }
                         handleEvent(event)
                     }
-                    if (notStarted) {
-                        streamJob = null
-                        return@launch
-                    }
+                    if (notStarted) return@launch
                     delay(1_000)
                 } catch (error: Exception) {
                     if (!isActive) return@launch
@@ -1083,7 +1143,6 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                             error.message?.contains("HTTP 404") == true
                         ) {
                             GatewaySessionStore.reset()
-                            streamJob = null
                             _state.update { it.copy(streaming = false, stopping = false) }
                             return@launch
                         }

@@ -39,6 +39,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -264,12 +265,12 @@ fun AssistantScreen(
             }
         }
     }
-    var cameraFile by remember { mutableStateOf<File?>(null) }
+    var cameraPath by rememberSaveable { mutableStateOf<String?>(null) }
     val cameraPicker = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
-        val file = cameraFile
-        if (success && file != null) {
+        val path = cameraPath
+        if (success && path != null) {
             scope.launch {
-                runCatching { readCameraPhoto(file) }
+                runCatching { readCameraPhoto(File(path)) }
                     .onSuccess { onAddAttachment(it) }
                     .onFailure { onNotice(it.message ?: "Could not read the photo.") }
             }
@@ -278,7 +279,7 @@ fun AssistantScreen(
     fun takePhoto() {
         val dir = File(context.cacheDir, "camera").apply { mkdirs() }
         val file = File(dir, "shot-${System.currentTimeMillis()}.jpg")
-        cameraFile = file
+        cameraPath = file.path
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
         cameraPicker.launch(uri)
     }
@@ -572,6 +573,7 @@ fun AssistantScreen(
                 allowEdits = state.allowEdits,
                 editsBusy = state.editsBusy,
                 canChangeEdits = !state.streaming && !state.stopping && !state.offline,
+                offline = state.offline,
                 onOpenThinking = {
                     onCloseModelPicker()
                     onOpenThinkingPicker()
@@ -1699,9 +1701,9 @@ private fun SessionSheet(
     onClose: () -> Unit,
 ) {
     var query by rememberSaveable { mutableStateOf("") }
-    var actionsFor by remember { mutableStateOf<String?>(null) }
-    var renaming by remember { mutableStateOf<GatewaySession?>(null) }
-    var removing by remember { mutableStateOf<String?>(null) }
+    var actionsFor by rememberSaveable { mutableStateOf<String?>(null) }
+    var renamingId by rememberSaveable { mutableStateOf<String?>(null) }
+    var removing by rememberSaveable { mutableStateOf<String?>(null) }
     val filtered = remember(sessions, query) {
         val needle = query.trim()
         if (needle.isEmpty()) {
@@ -1867,7 +1869,7 @@ private fun SessionSheet(
                                     TextButton(
                                         onClick = {
                                             actionsFor = null
-                                            renaming = session
+                                            renamingId = session.id
                                         },
                                         modifier = Modifier.heightIn(min = HelldyeDimens.TouchTarget),
                                     ) {
@@ -1937,15 +1939,17 @@ private fun SessionSheet(
         }
     }
 
-    renaming?.let { session ->
-        RenameSessionDialog(
-            session = session,
-            onCancel = { renaming = null },
-            onSave = { name ->
-                renaming = null
-                onRename(session.id, name)
-            },
-        )
+    renamingId?.let { id ->
+        sessions.firstOrNull { it.id == id }?.let { session ->
+            RenameSessionDialog(
+                session = session,
+                onCancel = { renamingId = null },
+                onSave = { name ->
+                    renamingId = null
+                    onRename(session.id, name)
+                },
+            )
+        }
     }
 }
 
@@ -1988,7 +1992,7 @@ private fun RenameSessionDialog(
     onCancel: () -> Unit,
     onSave: (String) -> Unit,
 ) {
-    var name by remember(session.id) { mutableStateOf(session.name) }
+    var name by rememberSaveable(session.id) { mutableStateOf(session.name) }
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -2054,12 +2058,13 @@ private fun ModelPicker(
     allowEdits: Boolean,
     editsBusy: Boolean,
     canChangeEdits: Boolean,
+    offline: Boolean,
     onOpenThinking: () -> Unit,
     onSetAllowEdits: (Boolean) -> Unit,
     onSelect: (GatewayModel) -> Unit,
     onClose: () -> Unit,
 ) {
-    var query by remember { mutableStateOf("") }
+    var query by rememberSaveable { mutableStateOf("") }
     val visible = remember(models, query) { ModelSearch.filter(models, query) }
     Box(
         modifier = Modifier
@@ -2071,6 +2076,7 @@ private fun ModelPicker(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(max = 560.dp)
+                .windowInsetsPadding(WindowInsets.safeDrawing)
                 .padding(HelldyeDimens.Lg)
                 .background(HelldyeColors.Black, RoundedCornerShape(4.dp))
                 .border(1.dp, HelldyeColors.LineStrong, RoundedCornerShape(4.dp))
@@ -2138,12 +2144,12 @@ private fun ModelPicker(
                             Modifier
                         },
                     )
-                    .clickable(
+                    .toggleable(
+                        value = allowEdits,
                         enabled = canChangeEdits && !editsBusy,
-                        role = Role.Button,
-                    ) {
-                        onSetAllowEdits(!allowEdits)
-                    }
+                        role = Role.Switch,
+                        onValueChange = onSetAllowEdits,
+                    )
                     .padding(horizontal = HelldyeDimens.Xs, vertical = HelldyeDimens.Sm),
             ) {
                 Row(
@@ -2177,7 +2183,11 @@ private fun ModelPicker(
                 )
                 if (!canChangeEdits && !editsBusy) {
                     Text(
-                        text = "Stop the active run first.",
+                        text = if (offline) {
+                            "Reconnect to change tool permissions."
+                        } else {
+                            "Stop the active run first."
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = HelldyeColors.TextMuted,
                     )
