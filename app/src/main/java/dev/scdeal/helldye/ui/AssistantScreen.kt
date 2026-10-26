@@ -90,6 +90,7 @@ import dev.scdeal.helldye.assistant.ConversationItem
 import dev.scdeal.helldye.assistant.ExtensionDialog
 import dev.scdeal.helldye.assistant.ExtensionWidget
 import dev.scdeal.helldye.assistant.ImageRules
+import dev.scdeal.helldye.assistant.ModelSearch
 import dev.scdeal.helldye.assistant.NoticeTone
 import dev.scdeal.helldye.assistant.ScreenCaptureState
 import dev.scdeal.helldye.assistant.SlashCommand
@@ -1944,7 +1945,11 @@ private fun SessionSheet(
 }
 
 @Composable
-private fun SearchField(value: String, onValueChange: (String) -> Unit) {
+private fun SearchField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String = "Search sessions",
+) {
     BasicTextField(
         value = value,
         onValueChange = onValueChange,
@@ -1961,7 +1966,7 @@ private fun SearchField(value: String, onValueChange: (String) -> Unit) {
             Box(contentAlignment = Alignment.CenterStart) {
                 if (value.isEmpty()) {
                     Text(
-                        text = "Search sessions",
+                        text = placeholder,
                         style = MaterialTheme.typography.bodyMedium,
                         color = HelldyeColors.TextMuted,
                     )
@@ -2045,6 +2050,8 @@ private fun ModelPicker(
     onSelect: (GatewayModel) -> Unit,
     onClose: () -> Unit,
 ) {
+    var query by remember { mutableStateOf("") }
+    val visible = remember(models, query) { ModelSearch.filter(models, query) }
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -2079,6 +2086,12 @@ private fun ModelPicker(
                 }
             }
             Hairline(color = HelldyeColors.LineSoft)
+            SearchField(
+                value = query,
+                onValueChange = { query = it },
+                placeholder = "Search provider or model",
+            )
+            Hairline(color = HelldyeColors.LineSoft)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2111,8 +2124,14 @@ private fun ModelPicker(
                 models.isEmpty() -> WarningBanner(
                     text = error ?: "No models are available on this gateway.",
                 )
+                visible.isEmpty() -> Text(
+                    text = "No models match \"$query\".",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = HelldyeColors.TextMuted,
+                    modifier = Modifier.padding(vertical = HelldyeDimens.Lg),
+                )
                 else -> LazyColumn(modifier = Modifier.heightIn(max = 380.dp)) {
-                    items(models, key = { "${it.provider}/${it.id}" }) { model ->
+                    items(visible, key = { "${it.provider}/${it.id}" }) { model ->
                         val active = model.provider == current?.provider && model.id == current.id
                         Column(Modifier.fillMaxWidth()) {
                             Row(
