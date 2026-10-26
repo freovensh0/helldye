@@ -136,6 +136,7 @@ abstract class AssistantHostActivity : ComponentActivity() {
             onOpenModelPicker = viewModel::openModelPicker,
             onCloseModelPicker = viewModel::closeModelPicker,
             onSelectModel = viewModel::selectModel,
+            onSetAllowEdits = viewModel::setAllowEdits,
             onOpenThinkingPicker = viewModel::openThinkingPicker,
             onCloseThinkingPicker = viewModel::closeThinkingPicker,
             onSelectThinking = viewModel::selectThinking,

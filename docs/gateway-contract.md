@@ -48,6 +48,7 @@ never a command-line argument, and never enters the Pi child environment.
 | `POST` | `/v1/sessions/{id}/prompt` | `{message, context?, images?}` | `200` `{accepted:true}` |
 | `POST` | `/v1/sessions/{id}/abort` | `{}` | `200` `{accepted:true}` |
 | `POST` | `/v1/sessions/{id}/compact` | `{}` | `200` `{accepted:true}` |
+| `POST` | `/v1/sessions/{id}/stop` | `{}` | `200` `{stopped:true|false}`; keeps the record |
 | `POST` | `/v1/sessions/{id}/name` | `{name}` | `200` `SessionInfo` |
 | `GET` | `/v1/sessions/{id}/models` | — | `200` Pi `get_available_models` data |
 | `GET` | `/v1/sessions/{id}/commands` | — | `200` Pi `get_commands` data |
@@ -71,7 +72,7 @@ never a command-line argument, and never enters the Pi child environment.
 {
   "id": "uuid", "name": "Session 4F2A", "cwd": "/absolute/path",
   "status": "running|idle|stopped", "started": true, "busy": true,
-  "onHost": false, "created": 1760000000
+  "onHost": false, "allowEdits": false, "created": 1760000000
 }
 ```
 
@@ -86,6 +87,10 @@ never a command-line argument, and never enters the Pi child environment.
 - `onHost` is true for records imported from `HELLDYE_PI_SESSION_DIR`. They are read-only metadata
   until a prompt starts them; removing one only removes the gateway record.
 - `created` is Unix seconds (imported records use the session file timestamp).
+- `allowEdits` is the per-session action-tool override. `false` uses `HELLDYE_TOOLS`; `true` uses
+  `HELLDYE_ACTION_TOOLS` on the next start.
+- `POST /stop` closes Pi's stdin without removing the record or its transcript. It returns `409` while
+  a turn is running; abort first. The next prompt starts Pi again with the current tool set.
 
 ### 2.1.1 Info
 
@@ -206,10 +211,10 @@ All routes are read-only except worktree creation and the per-session tool gate.
   (no leading `-`, no `..`, `[A-Za-z0-9._/-]` only) and an absolute destination whose parent is inside
   `HELLDYE_WORKSPACES`, then runs `git worktree add <path> -b <branch>` with fixed argv. There is no
   delete route. Switch worktrees by creating a session with the worktree path as `cwd`.
-- `POST /allow_edits` is per session and only while stopped (`409` otherwise). Enabling requires
-  `HELLDYE_ACTION_TOOLS`; the override is persisted and applies the next time Pi starts for that
-  session. Disabling returns it to `HELLDYE_TOOLS`. Ephemeral sessions are always read-only. Each
-  toggle is audited on stderr without prompt content.
+- `POST /allow_edits` is per session and only while stopped (`409` otherwise; call `/stop` first).
+  Enabling requires `HELLDYE_ACTION_TOOLS`; the override is persisted and applies the next time Pi
+  starts for that session. Disabling returns it to `HELLDYE_TOOLS`. Ephemeral sessions are always
+  read-only. Each toggle is audited on stderr without prompt content.
 - `GET /tree` maps to Pi's `get_tree` and flattens it to `{id, type, role, depth, label, leaf}`; message
   bodies are never returned. `GET /export` calls Pi's `export_html` into a unique temp file, streams
   the HTML as `text/html`, and deletes the file. Both are capability-gated (`tree`, `export`).

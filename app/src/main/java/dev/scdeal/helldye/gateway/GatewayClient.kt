@@ -71,6 +71,7 @@ data class GatewayState(
     val busy: Boolean = false,
     val stopping: Boolean = false,
     val status: String = "stopped",
+    val allowEdits: Boolean = false,
     val lastEventId: String? = null,
     val epoch: String? = null,
 )
@@ -185,6 +186,21 @@ class GatewayClient(private val config: GatewayConfig) {
 
     fun compact(sessionId: String) {
         request("POST", "/sessions/$sessionId/compact", JSONObject())
+    }
+
+    /** Closes Pi's stdin but keeps the session record; the next prompt resumes it. */
+    fun stopSession(sessionId: String) {
+        request("POST", "/sessions/$sessionId/stop", JSONObject())
+    }
+
+    /** Enables the gateway's action-tool override for this session only. */
+    fun setAllowEdits(sessionId: String, enabled: Boolean): Boolean {
+        val response = request(
+            "POST",
+            "/sessions/$sessionId/allow_edits",
+            JSONObject().put("enabled", enabled),
+        )
+        return response.optBoolean("allowEdits", enabled)
     }
 
     fun deleteSession(sessionId: String) {
@@ -350,6 +366,7 @@ class GatewayClient(private val config: GatewayConfig) {
             busy = response.optBoolean("busy", false),
             stopping = response.optBoolean("stopping", false),
             status = response.optString("status", "stopped"),
+            allowEdits = response.optBoolean("allowEdits", false),
             lastEventId = response.optString("lastEventId").takeIf { it.isNotBlank() },
             epoch = response.optString("epoch").takeIf { it.isNotBlank() },
         )

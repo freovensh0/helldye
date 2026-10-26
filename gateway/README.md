@@ -148,6 +148,7 @@ unauthenticated route.
 | `POST` | `/v1/sessions/{id}/thinking` | Set the thinking level (`level`). |
 | `POST` | `/v1/sessions/{id}/extension_ui_response` | Answer an extension dialog (`id`, `value`/`confirmed`/`cancelled`). |
 | `POST` | `/v1/sessions/{id}/compact` | Compact the session context. |
+| `POST` | `/v1/sessions/{id}/stop` | Close Pi's stdin but keep the record; `409` while a turn runs. |
 | `POST` | `/v1/sessions/{id}/name` | Rename the session (`name`). |
 
 The versioned contract — request shapes, SSE events, `eventId` and epoch semantics, busy state, error
@@ -188,8 +189,10 @@ image MIME type, base64, dimensions, and size before forwarding the bytes.
   UTF-8 text inside the workspace; `/worktrees` lists and creates git worktrees with fixed argv and an
   allowlisted destination. There is no phone-side delete, editor, commit, or push.
 - Action tools stay off per session. `POST /allow_edits` with `{enabled:true}` requires
-  `HELLDYE_ACTION_TOOLS`, refuses a running session, applies only to that session, and is persisted.
-  Enabling is audited on stderr without prompt content.
+  `HELLDYE_ACTION_TOOLS`, refuses a running session (`POST /stop` first), applies only to that
+  session, and is persisted. Enabling is audited on stderr without prompt content. The Termux
+  `hellgate start` sets `HELLDYE_ACTION_TOOLS` from `~/helldye-gateway/action-tools` when present,
+  otherwise from the write set (or `*` when the global tools file is `*`).
 - Prompts are accepted asynchronously; streamed output and command responses arrive on SSE.
 - Pi's stderr is drained but not logged by default. Set `HELLDYE_DEBUG=1` to log it; lines are
   bounded and any prompt-like, content, message, data, or image payload is dropped or redacted. The

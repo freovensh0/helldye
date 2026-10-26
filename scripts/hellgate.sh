@@ -7,6 +7,8 @@ PID_FILE="$DIR/gateway.pid"
 LOG_FILE="$DIR/gateway.log"
 TOKEN_FILE="$HOME/.config/helldye/token"
 TOOLS_FILE="$DIR/tools"
+ACTION_TOOLS_FILE="$DIR/action-tools"
+ACTION_TOOLS_DEFAULT="read,bash,edit,write,grep,find,ls"
 ALL_TOOLS=(read bash edit write grep find ls)
 READ_ONLY_TOOLS=(read grep find ls)
 LISTEN="${HELLDYE_LISTEN:-127.0.0.1:8787}"
@@ -81,6 +83,16 @@ start() {
 
     if [ -s "$TOOLS_FILE" ]; then
         export HELLDYE_TOOLS="$(cat "$TOOLS_FILE")"
+    fi
+
+    if [ -z "${HELLDYE_ACTION_TOOLS:-}" ]; then
+        if [ -s "$ACTION_TOOLS_FILE" ]; then
+            export HELLDYE_ACTION_TOOLS="$(cat "$ACTION_TOOLS_FILE")"
+        elif [ -s "$TOOLS_FILE" ] && [ "$(cat "$TOOLS_FILE")" = "*" ]; then
+            export HELLDYE_ACTION_TOOLS="*"
+        else
+            export HELLDYE_ACTION_TOOLS="$ACTION_TOOLS_DEFAULT"
+        fi
     fi
 
     HELLDYE_TOKEN_FILE="$TOKEN_FILE" nohup "$DIR/helldye-gateway" \

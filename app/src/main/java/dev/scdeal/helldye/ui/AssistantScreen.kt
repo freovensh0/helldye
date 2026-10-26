@@ -134,6 +134,7 @@ fun AssistantScreen(
     onOpenModelPicker: () -> Unit,
     onCloseModelPicker: () -> Unit,
     onSelectModel: (GatewayModel) -> Unit,
+    onSetAllowEdits: (Boolean) -> Unit,
     onOpenThinkingPicker: () -> Unit,
     onCloseThinkingPicker: () -> Unit,
     onSelectThinking: (String) -> Unit,
@@ -568,10 +569,14 @@ fun AssistantScreen(
                 loading = state.capabilitiesLoading,
                 error = state.error,
                 thinking = state.thinkingLevel,
+                allowEdits = state.allowEdits,
+                editsBusy = state.editsBusy,
+                canChangeEdits = !state.streaming && !state.stopping && !state.offline,
                 onOpenThinking = {
                     onCloseModelPicker()
                     onOpenThinkingPicker()
                 },
+                onSetAllowEdits = onSetAllowEdits,
                 onSelect = onSelectModel,
                 onClose = onCloseModelPicker,
             )
@@ -2046,7 +2051,11 @@ private fun ModelPicker(
     loading: Boolean,
     error: String?,
     thinking: String?,
+    allowEdits: Boolean,
+    editsBusy: Boolean,
+    canChangeEdits: Boolean,
     onOpenThinking: () -> Unit,
+    onSetAllowEdits: (Boolean) -> Unit,
     onSelect: (GatewayModel) -> Unit,
     onClose: () -> Unit,
 ) {
@@ -2061,6 +2070,7 @@ private fun ModelPicker(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .heightIn(max = 560.dp)
                 .padding(HelldyeDimens.Lg)
                 .background(HelldyeColors.Black, RoundedCornerShape(4.dp))
                 .border(1.dp, HelldyeColors.LineStrong, RoundedCornerShape(4.dp))
@@ -2114,6 +2124,67 @@ private fun ModelPicker(
             }
             Hairline(color = HelldyeColors.LineSoft)
 
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .then(
+                        if (allowEdits) {
+                            Modifier.border(
+                                1.dp,
+                                HelldyeColors.SignalLine,
+                                RoundedCornerShape(2.dp),
+                            )
+                        } else {
+                            Modifier
+                        },
+                    )
+                    .clickable(
+                        enabled = canChangeEdits && !editsBusy,
+                        role = Role.Button,
+                    ) {
+                        onSetAllowEdits(!allowEdits)
+                    }
+                    .padding(horizontal = HelldyeDimens.Xs, vertical = HelldyeDimens.Sm),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "FILE EDITS",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = HelldyeColors.TextMuted,
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        text = when {
+                            editsBusy -> "APPLYING"
+                            allowEdits -> "ALLOWED"
+                            else -> "READ-ONLY"
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (allowEdits) HelldyeColors.Signal else HelldyeColors.TextSecondary,
+                    )
+                }
+                Text(
+                    text = when {
+                        editsBusy -> "Stopping Pi and applying the new tool set."
+                        allowEdits -> "Pi can edit files in this workspace."
+                        else -> "Read-only tools unless the gateway default allows more."
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (allowEdits) HelldyeColors.Signal else HelldyeColors.TextMuted,
+                )
+                if (!canChangeEdits && !editsBusy) {
+                    Text(
+                        text = "Stop the active run first.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = HelldyeColors.TextMuted,
+                    )
+                }
+            }
+            Hairline(color = HelldyeColors.LineSoft)
+
             when {
                 loading && models.isEmpty() -> Text(
                     text = "LOADING",
@@ -2130,7 +2201,7 @@ private fun ModelPicker(
                     color = HelldyeColors.TextMuted,
                     modifier = Modifier.padding(vertical = HelldyeDimens.Lg),
                 )
-                else -> LazyColumn(modifier = Modifier.heightIn(max = 380.dp)) {
+                else -> LazyColumn(modifier = Modifier.weight(1f, fill = false)) {
                     items(visible, key = { "${it.provider}/${it.id}" }) { model ->
                         val active = model.provider == current?.provider && model.id == current.id
                         Column(Modifier.fillMaxWidth()) {
@@ -2649,6 +2720,7 @@ private fun AssistantScreenPreview() {
             onOpenModelPicker = {},
             onCloseModelPicker = {},
             onSelectModel = {},
+            onSetAllowEdits = {},
             onOpenThinkingPicker = {},
             onCloseThinkingPicker = {},
             onSelectThinking = {},
