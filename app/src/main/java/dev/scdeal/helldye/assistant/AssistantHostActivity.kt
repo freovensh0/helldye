@@ -1,7 +1,10 @@
 package dev.scdeal.helldye.assistant
 
 import android.app.KeyguardManager
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -28,6 +31,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.scdeal.helldye.ui.AssistantScreen
 import dev.scdeal.helldye.ui.SettingsActivity
@@ -46,6 +50,16 @@ abstract class AssistantHostActivity : ComponentActivity() {
     private var unlocked by mutableStateOf(false)
     private var unlockNotice by mutableStateOf<String?>(null)
     private val keyguard: KeyguardManager? by lazy { getSystemService(KeyguardManager::class.java) }
+    private val lockReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                // A showWhenLocked overlay stays in front when the screen turns off, so the gate
+                // must close at screen-off rather than wait for the next activity resume.
+                Intent.ACTION_SCREEN_OFF -> unlocked = false
+                Intent.ACTION_USER_PRESENT -> unlocked = keyguard?.isKeyguardLocked != true
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge(
@@ -61,6 +75,15 @@ abstract class AssistantHostActivity : ComponentActivity() {
         // The operator asked for assist screenshots to work; FLAG_SECURE is intentionally absent.
         // Recents is still excluded, and the screenshot stays memory-only.
         unlocked = keyguard?.isKeyguardLocked != true
+        ContextCompat.registerReceiver(
+            this,
+            lockReceiver,
+            IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(Intent.ACTION_USER_PRESENT)
+            },
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
 
         setContent {
             HelldyeTheme {
@@ -144,7 +167,7 @@ abstract class AssistantHostActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (keyguard?.isKeyguardLocked == true) unlocked = false
+        unlocked = keyguard?.isKeyguardLocked != true
     }
 
     override fun onStop() {
@@ -188,6 +211,7 @@ abstract class AssistantHostActivity : ComponentActivity() {
                 AssistantDraftStore.clear()
             }
         }
+        runCatching { unregisterReceiver(lockReceiver) }
         super.onDestroy()
     }
 }
