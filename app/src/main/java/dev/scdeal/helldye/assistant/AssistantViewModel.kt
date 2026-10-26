@@ -532,6 +532,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             try {
                 val gateway = ensureClient(config)
                 val session = ensureSession(gateway, config)
+                if (GatewaySessionStore.sessionId != session.id) return@launch
                 startStream(gateway, session.id)
                 // Opening the picker is an explicit action, so a stopped session may start Pi here
                 // to ask it for the model list.
@@ -564,6 +565,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             try {
                 val gateway = ensureClient(config)
                 val session = ensureSession(gateway, config)
+                if (GatewaySessionStore.sessionId != session.id) return@launch
                 startStream(gateway, session.id)
                 val levels = runCatching { gateway.thinkingLevels(session.id) }
                     .getOrElse { emptyList() }
