@@ -1196,14 +1196,52 @@ fn git_output(cwd: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn git_diff_output(cwd: &Path, extra: &[&str]) -> Result<String, String> {
+/// Captures at most `limit` bytes of the diff. A full `git diff` on a large workspace can be
+/// hundreds of megabytes, so stdout is bounded and git is stopped when the limit is exceeded.
+fn git_diff_limited(cwd: &Path, extra: &[&str], limit: usize) -> Result<(String, bool), String> {
+    use std::io::Read;
     let mut args = vec!["diff"];
     if git_output(cwd, &["rev-parse", "--verify", "HEAD"]).is_ok() {
         args.push("HEAD");
     }
     args.push("--no-color");
     args.extend_from_slice(extra);
-    git_output(cwd, &args)
+    let mut child = std::process::Command::new("git")
+        .current_dir(cwd)
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("git is unavailable: {error}"))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "git stdout is unavailable".to_string())?;
+    let mut bytes = Vec::new();
+    stdout
+        .by_ref()
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    let truncated = bytes.len() > limit;
+    if truncated {
+        let _ = child.kill();
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| error.to_string())?;
+    if !truncated && !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if truncated {
+        let mut cut = text.len().min(limit);
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+    }
+    Ok((text, truncated))
 }
 
 fn parse_numstat(text: &str) -> Vec<Value> {
@@ -1231,34 +1269,39 @@ async fn session_diff(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let session = lookup_owned(&state, &id).await?;
     let cwd = PathBuf::from(&session.cwd);
-    let numstat = git_diff_output(&cwd, &["--numstat"]).map_err(bad_gateway)?;
-    let diff = git_diff_output(&cwd, &[]).map_err(bad_gateway)?;
-    let untracked =
-        git_output(&cwd, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
-    let mut files = parse_numstat(&numstat);
-    for path in untracked.lines().take(20) {
-        if path.is_empty() {
-            continue;
+    // Git and the untracked-file reads are blocking; keep them off the async workers.
+    let (files, diff, truncated) = tokio::task::spawn_blocking(move || {
+        let numstat = git_diff_limited(&cwd, &["--numstat"], MAX_DIFF_BYTES)?.0;
+        let (diff, truncated) = git_diff_limited(&cwd, &[], MAX_DIFF_BYTES)?;
+        let untracked =
+            git_output(&cwd, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
+        let mut files = parse_numstat(&numstat);
+        for path in untracked.lines().take(20) {
+            if path.is_empty() {
+                continue;
+            }
+            let additions = std::fs::metadata(cwd.join(path))
+                .ok()
+                .filter(|metadata| metadata.len() <= MAX_FILE_BYTES as u64)
+                .and_then(|_| std::fs::read_to_string(cwd.join(path)).ok())
+                .map(|content| content.lines().count() as u64)
+                .unwrap_or(0);
+            files.push(json!({
+                "path": path,
+                "additions": additions,
+                "deletions": 0,
+                "binary": false,
+                "untracked": true,
+            }));
         }
-        let additions = std::fs::read_to_string(cwd.join(path))
-            .map(|content| content.lines().count() as u64)
-            .unwrap_or(0);
-        files.push(json!({
-            "path": path,
-            "additions": additions,
-            "deletions": 0,
-            "binary": false,
-            "untracked": true,
-        }));
-    }
-    let truncated = diff.len() > MAX_DIFF_BYTES;
-    let mut cut = diff.len().min(MAX_DIFF_BYTES);
-    while !diff.is_char_boundary(cut) {
-        cut -= 1;
-    }
+        Ok::<_, String>((files, diff, truncated))
+    })
+    .await
+    .map_err(|error| bad_gateway(error.to_string()))?
+    .map_err(bad_gateway)?;
     Ok(Json(json!({
         "files": files,
-        "diff": &diff[..cut],
+        "diff": diff,
         "truncated": truncated,
     })))
 }
@@ -2544,7 +2587,7 @@ mod tests {
     use super::acquire_writer_lock;
     use super::{
         CachedModel, ContextFile, ImageBody, PromptContext, constant_time_eq, decode_base64,
-        ensure_token_file_outside_workspaces, git_diff_output, info_payload, jpeg_dimensions,
+        ensure_token_file_outside_workspaces, git_diff_limited, info_payload, jpeg_dimensions,
         migrated_name, neutral_name, paginate_messages, parse_host_messages, parse_numstat,
         parse_session_metadata, parse_worktrees, pi_command, png_dimensions, read_token_file,
         redact_stderr_line, resolve_workspace, resync_event, scan_import_dir, should_reap,
@@ -3522,11 +3565,42 @@ mod tests {
         git(&["commit", "-qm", "initial"]);
         fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
 
-        let diff = git_diff_output(&dir, &[]).unwrap();
+        let (diff, truncated) = git_diff_limited(&dir, &[], super::MAX_DIFF_BYTES).unwrap();
+        assert!(!truncated);
         assert!(diff.contains("+two"));
-        let files = parse_numstat(&git_diff_output(&dir, &["--numstat"]).unwrap());
+        let numstat = git_diff_limited(&dir, &["--numstat"], super::MAX_DIFF_BYTES)
+            .unwrap()
+            .0;
+        let files = parse_numstat(&numstat);
         assert_eq!(files[0]["path"], "a.txt");
         assert_eq!(files[0]["additions"], 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn diff_capture_stops_at_the_byte_limit() {
+        let dir = temp_dir("git-diff-limit");
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .current_dir(&dir)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(status.status.success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        fs::write(dir.join("big.txt"), "a\n".repeat(4_000)).unwrap();
+        git(&["add", "big.txt"]);
+        git(&["commit", "-qm", "initial"]);
+        fs::write(dir.join("big.txt"), "b\n".repeat(4_000)).unwrap();
+
+        let (diff, truncated) = git_diff_limited(&dir, &[], 1_000).unwrap();
+        assert!(truncated);
+        assert!(diff.len() <= 1_000);
+        let (_, truncated) = git_diff_limited(&dir, &[], super::MAX_DIFF_BYTES).unwrap();
+        assert!(!truncated);
         let _ = fs::remove_dir_all(&dir);
     }
 
