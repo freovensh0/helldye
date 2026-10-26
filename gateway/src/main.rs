@@ -126,6 +126,9 @@ struct Session {
     tools_override: Mutex<Option<String>>,
     stdin: Mutex<Option<ChildStdin>>,
     start: Mutex<()>,
+    /// Bumped for every child start. A reader or waiter from an older child must not touch the
+    /// current one.
+    generation: AtomicU64,
     seq: AtomicU64,
     streaming: AtomicBool,
     stopping: AtomicBool,
@@ -288,17 +291,20 @@ struct ExtensionUiResponse {
 }
 
 impl Session {
-    async fn publish(&self, kind: String, data: String) {
+    async fn publish(&self, generation: u64, kind: String, data: String) {
+        let mut events = self.events.lock().await;
+        // A superseded child must not inject an event into the restarted session.
+        if self.generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
         self.last_activity.store(now_epoch(), Ordering::SeqCst);
         let id = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         let event = WireEvent { id, kind, data };
-        {
-            let mut events = self.events.lock().await;
-            if events.len() >= EVENT_BUFFER {
-                events.pop_front();
-            }
-            events.push_back(event.clone());
+        if events.len() >= EVENT_BUFFER {
+            events.pop_front();
         }
+        events.push_back(event.clone());
+        drop(events);
         let _ = self.tx.send(event);
     }
 
@@ -1050,13 +1056,13 @@ async fn prompt(
     let session = lookup(&state, &id)
         .await
         .map_err(|status| (status, "not found".into()))?;
-    ensure_started(&state, &session)
-        .await
-        .map_err(bad_gateway)?;
     if body.message.trim().is_empty() && body.images.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "message is empty".into()));
     }
     validate_images(&body.images)?;
+    ensure_started(&state, &session)
+        .await
+        .map_err(bad_gateway)?;
 
     let has_images = !body.images.is_empty();
     let message = compose_prompt(&body.message, body.context.as_ref(), has_images);
@@ -1190,14 +1196,52 @@ fn git_output(cwd: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn git_diff_output(cwd: &Path, extra: &[&str]) -> Result<String, String> {
+/// Captures at most `limit` bytes of the diff. A full `git diff` on a large workspace can be
+/// hundreds of megabytes, so stdout is bounded and git is stopped when the limit is exceeded.
+fn git_diff_limited(cwd: &Path, extra: &[&str], limit: usize) -> Result<(String, bool), String> {
+    use std::io::Read;
     let mut args = vec!["diff"];
     if git_output(cwd, &["rev-parse", "--verify", "HEAD"]).is_ok() {
         args.push("HEAD");
     }
     args.push("--no-color");
     args.extend_from_slice(extra);
-    git_output(cwd, &args)
+    let mut child = std::process::Command::new("git")
+        .current_dir(cwd)
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("git is unavailable: {error}"))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "git stdout is unavailable".to_string())?;
+    let mut bytes = Vec::new();
+    stdout
+        .by_ref()
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    let truncated = bytes.len() > limit;
+    if truncated {
+        let _ = child.kill();
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| error.to_string())?;
+    if !truncated && !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if truncated {
+        let mut cut = text.len().min(limit);
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+    }
+    Ok((text, truncated))
 }
 
 fn parse_numstat(text: &str) -> Vec<Value> {
@@ -1225,34 +1269,39 @@ async fn session_diff(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let session = lookup_owned(&state, &id).await?;
     let cwd = PathBuf::from(&session.cwd);
-    let numstat = git_diff_output(&cwd, &["--numstat"]).map_err(bad_gateway)?;
-    let diff = git_diff_output(&cwd, &[]).map_err(bad_gateway)?;
-    let untracked =
-        git_output(&cwd, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
-    let mut files = parse_numstat(&numstat);
-    for path in untracked.lines().take(20) {
-        if path.is_empty() {
-            continue;
+    // Git and the untracked-file reads are blocking; keep them off the async workers.
+    let (files, diff, truncated) = tokio::task::spawn_blocking(move || {
+        let numstat = git_diff_limited(&cwd, &["--numstat"], MAX_DIFF_BYTES)?.0;
+        let (diff, truncated) = git_diff_limited(&cwd, &[], MAX_DIFF_BYTES)?;
+        let untracked =
+            git_output(&cwd, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
+        let mut files = parse_numstat(&numstat);
+        for path in untracked.lines().take(20) {
+            if path.is_empty() {
+                continue;
+            }
+            let additions = std::fs::metadata(cwd.join(path))
+                .ok()
+                .filter(|metadata| metadata.len() <= MAX_FILE_BYTES as u64)
+                .and_then(|_| std::fs::read_to_string(cwd.join(path)).ok())
+                .map(|content| content.lines().count() as u64)
+                .unwrap_or(0);
+            files.push(json!({
+                "path": path,
+                "additions": additions,
+                "deletions": 0,
+                "binary": false,
+                "untracked": true,
+            }));
         }
-        let additions = std::fs::read_to_string(cwd.join(path))
-            .map(|content| content.lines().count() as u64)
-            .unwrap_or(0);
-        files.push(json!({
-            "path": path,
-            "additions": additions,
-            "deletions": 0,
-            "binary": false,
-            "untracked": true,
-        }));
-    }
-    let truncated = diff.len() > MAX_DIFF_BYTES;
-    let mut cut = diff.len().min(MAX_DIFF_BYTES);
-    while !diff.is_char_boundary(cut) {
-        cut -= 1;
-    }
+        Ok::<_, String>((files, diff, truncated))
+    })
+    .await
+    .map_err(|error| bad_gateway(error.to_string()))?
+    .map_err(bad_gateway)?;
     Ok(Json(json!({
         "files": files,
-        "diff": &diff[..cut],
+        "diff": diff,
         "truncated": truncated,
     })))
 }
@@ -1800,23 +1849,28 @@ async fn session_events(
         }
 
         loop {
-            match subscriber.recv().await {
-                Ok(event) => {
-                    if event.id < next {
-                        continue;
+            tokio::select! {
+                // The SSE response owns the receiver. Without this arm a quiet, disconnected
+                // client keeps the subscriber count up until the next Pi event arrives.
+                _ = tx.closed() => break,
+                result = subscriber.recv() => match result {
+                    Ok(event) => {
+                        if event.id < next {
+                            continue;
+                        }
+                        if tx.send(event.clone()).await.is_err() {
+                            break;
+                        }
+                        next = event.id + 1;
                     }
-                    if tx.send(event.clone()).await.is_err() {
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        // The broadcast ring dropped events. Tell the client to resync from
+                        // /messages instead of continuing with a silent gap.
+                        let _ = tx.send(resync_event(next.saturating_sub(1))).await;
                         break;
                     }
-                    next = event.id + 1;
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    // The broadcast ring dropped events. Tell the client to resync from /messages
-                    // instead of continuing with a silent gap.
-                    let _ = tx.send(resync_event(next.saturating_sub(1))).await;
-                    break;
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
             }
         }
     });
@@ -1982,6 +2036,7 @@ fn new_session(
         tools_override: Mutex::new(None),
         stdin: Mutex::new(None),
         start: Mutex::new(()),
+        generation: AtomicU64::new(0),
         seq: AtomicU64::new(0),
         streaming: AtomicBool::new(false),
         stopping: AtomicBool::new(false),
@@ -2037,22 +2092,43 @@ async fn ensure_started(state: &AppState, session: &Arc<Session>) -> Result<(), 
     let stdin = child.stdin.take().ok_or("pi stdin is unavailable")?;
     let stdout = child.stdout.take().ok_or("pi stdout is unavailable")?;
     let stderr = child.stderr.take().ok_or("pi stderr is unavailable")?;
-    session.events.lock().await.clear();
+    let generation = {
+        let mut events = session.events.lock().await;
+        // Bump before the new reader starts, so a line still in flight from the old child cannot
+        // land in the new session's event ring or state.
+        let generation = session.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        events.clear();
+        generation
+    };
     session.pending.lock().await.clear();
     *session.stdin.lock().await = Some(stdin);
     *session.status.lock().await = "running".into();
 
-    tokio::spawn(read_stdout(session.clone(), stdout, state.clone()));
+    tokio::spawn(read_stdout(
+        session.clone(),
+        stdout,
+        state.clone(),
+        generation,
+    ));
     tokio::spawn(read_stderr(stderr, state.debug_stderr));
     let watcher = session.clone();
     tokio::spawn(async move {
         let _ = child.wait().await;
+        // Serialize this exit with `ensure_started`: a restarted child may already own stdin.
+        let _guard = watcher.start.lock().await;
+        if watcher.generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
         *watcher.stdin.lock().await = None;
         watcher.streaming.store(false, Ordering::SeqCst);
         watcher.stopping.store(false, Ordering::SeqCst);
         *watcher.status.lock().await = "stopped".into();
+        // Fail waiting requests now instead of leaving them to their timeouts.
+        watcher.pending.lock().await.clear();
+        drop(_guard);
         watcher
             .publish(
+                generation,
                 "gateway_exit".into(),
                 json!({ "type": "gateway_exit", "reason": "pi exited" }).to_string(),
             )
@@ -2137,6 +2213,9 @@ async fn load_sessions(
 }
 
 async fn persist_sessions(state: &AppState) {
+    // Take the write lock before snapshotting: otherwise a later caller can snapshot newer state,
+    // write first, and then be overwritten by this caller's stale snapshot.
+    let _guard = state.state_lock.lock().await;
     let sessions = state.sessions.read().await;
     let mut stored = Vec::with_capacity(sessions.len());
     for session in sessions.values() {
@@ -2161,9 +2240,12 @@ async fn persist_sessions(state: &AppState) {
     let Ok(bytes) = serde_json::to_vec_pretty(&stored) else {
         return;
     };
-    let _guard = state.state_lock.lock().await;
     let state_file = state.state_file.clone();
-    let _ = tokio::task::spawn_blocking(move || write_state_atomically(&state_file, &bytes)).await;
+    if let Ok(Err(error)) =
+        tokio::task::spawn_blocking(move || write_state_atomically(&state_file, &bytes)).await
+    {
+        eprintln!("state write failed: {error}");
+    }
 }
 
 /// Write to a sibling temp file, fsync it, rename, then fsync the directory. A crash leaves either
@@ -2186,9 +2268,20 @@ fn write_state_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-async fn read_stdout(session: Arc<Session>, stdout: tokio::process::ChildStdout, state: AppState) {
+async fn read_stdout(
+    session: Arc<Session>,
+    stdout: tokio::process::ChildStdout,
+    state: AppState,
+    generation: u64,
+) {
     let mut lines = BufReader::new(stdout).lines();
     while let Ok(Some(line)) = lines.next_line().await {
+        // Serialize event handling with a restart, so a superseded child cannot change the new
+        // child's streaming state or publish into its event ring.
+        let _guard = session.start.lock().await;
+        if session.generation.load(Ordering::SeqCst) != generation {
+            break;
+        }
         let parsed = serde_json::from_str::<Value>(&line).ok();
         let kind = parsed
             .as_ref()
@@ -2217,7 +2310,7 @@ async fn read_stdout(session: Arc<Session>, stdout: tokio::process::ChildStdout,
             }
             _ => {}
         }
-        session.publish(kind.clone(), line).await;
+        session.publish(generation, kind.clone(), line).await;
         if session.ephemeral && kind == "agent_settled" {
             // The subscriber already has the settled event; the one-shot record is done.
             remove_ephemeral(&state, &session.id).await;
@@ -2494,7 +2587,7 @@ mod tests {
     use super::acquire_writer_lock;
     use super::{
         CachedModel, ContextFile, ImageBody, PromptContext, constant_time_eq, decode_base64,
-        ensure_token_file_outside_workspaces, git_diff_output, info_payload, jpeg_dimensions,
+        ensure_token_file_outside_workspaces, git_diff_limited, info_payload, jpeg_dimensions,
         migrated_name, neutral_name, paginate_messages, parse_host_messages, parse_numstat,
         parse_session_metadata, parse_worktrees, pi_command, png_dimensions, read_token_file,
         redact_stderr_line, resolve_workspace, resync_event, scan_import_dir, should_reap,
@@ -3020,6 +3113,231 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_keeps_the_new_child_after_the_old_one_exits() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = FAKE_PI_LOCK.lock().await;
+        let dir = temp_dir("restart-race");
+        let workspace = dir.join("ws");
+        fs::create_dir_all(&workspace).unwrap();
+        let script = dir.join("pi");
+        // Exit takes a second after stdin closes, so the old waiter runs after the restart.
+        fs::write(&script, "#!/bin/sh\nread -r line || true\nsleep 1\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let state = super::AppState {
+            pi_bin: script.to_string_lossy().into_owned(),
+            tools: "read".into(),
+            token: "secret".into(),
+            workspaces: std::sync::Arc::new(vec![workspace.canonicalize().unwrap()]),
+            debug_stderr: false,
+            sessions: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            state_file: dir.join("sessions.json"),
+            epoch: "test-epoch".into(),
+            idle_secs: 0,
+            state_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        };
+        let session = super::new_session(
+            "12345678-aaaa".into(),
+            "Session 12345678".into(),
+            workspace.canonicalize().unwrap(),
+            super::now_epoch(),
+            false,
+            false,
+        );
+        super::ensure_started(&state, &session).await.unwrap();
+
+        session.stdin.lock().await.take();
+        super::ensure_started(&state, &session).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+
+        assert!(
+            session.stdin.lock().await.is_some(),
+            "the old child's exit closed the new child's stdin"
+        );
+        assert_eq!(*session.status.lock().await, "running");
+
+        session.stdin.lock().await.take();
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn disconnecting_an_sse_client_releases_its_subscription() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = FAKE_PI_LOCK.lock().await;
+        let dir = temp_dir("sse-disconnect");
+        let workspace = dir.join("ws");
+        fs::create_dir_all(&workspace).unwrap();
+        let script = dir.join("pi");
+        fs::write(&script, "#!/bin/sh\nread -r line || true\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let state = super::AppState {
+            pi_bin: script.to_string_lossy().into_owned(),
+            tools: "read".into(),
+            token: "secret".into(),
+            workspaces: std::sync::Arc::new(vec![workspace.canonicalize().unwrap()]),
+            debug_stderr: false,
+            sessions: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            state_file: dir.join("sessions.json"),
+            epoch: "test-epoch".into(),
+            idle_secs: 0,
+            state_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        };
+        let session = super::new_session(
+            "12345678-dddd".into(),
+            "Session 12345678".into(),
+            workspace.canonicalize().unwrap(),
+            super::now_epoch(),
+            false,
+            false,
+        );
+        super::ensure_started(&state, &session).await.unwrap();
+        state
+            .sessions
+            .write()
+            .await
+            .insert(session.id.clone(), session.clone());
+        let stream = super::session_events(
+            State(state),
+            AxumPath(session.id.clone()),
+            axum::extract::Query(super::EventsQuery { replay: true }),
+            axum::http::HeaderMap::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            session
+                .subscribers
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        // Let the subscriber task pass its initial epoch send and wait on the broadcast.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        drop(stream);
+
+        for _ in 0..50 {
+            if session
+                .subscribers
+                .load(std::sync::atomic::Ordering::SeqCst)
+                == 0
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            session
+                .subscribers
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a disconnected client kept its subscription"
+        );
+        session.stdin.lock().await.take();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn child_exit_fails_pending_requests_before_their_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = FAKE_PI_LOCK.lock().await;
+        let dir = temp_dir("exit-pending");
+        let workspace = dir.join("ws");
+        fs::create_dir_all(&workspace).unwrap();
+        let script = dir.join("pi");
+        fs::write(&script, "#!/bin/sh\nread -r line || true\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let state = super::AppState {
+            pi_bin: script.to_string_lossy().into_owned(),
+            tools: "read".into(),
+            token: "secret".into(),
+            workspaces: std::sync::Arc::new(vec![workspace.canonicalize().unwrap()]),
+            debug_stderr: false,
+            sessions: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            state_file: dir.join("sessions.json"),
+            epoch: "test-epoch".into(),
+            idle_secs: 0,
+            state_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        };
+        let session = super::new_session(
+            "12345678-bbbb".into(),
+            "Session 12345678".into(),
+            workspace.canonicalize().unwrap(),
+            super::now_epoch(),
+            false,
+            false,
+        );
+        super::ensure_started(&state, &session).await.unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        session.pending.lock().await.insert("pending".into(), tx);
+
+        session.stdin.lock().await.take();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), rx).await;
+        assert!(result.is_ok(), "pending request waited for its timeout");
+        assert!(result.unwrap().is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn empty_prompt_is_rejected_without_spawning_pi() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = FAKE_PI_LOCK.lock().await;
+        let dir = temp_dir("empty-prompt");
+        let workspace = dir.join("ws");
+        fs::create_dir_all(&workspace).unwrap();
+        let marker = dir.join("spawned");
+        let script = dir.join("pi");
+        fs::write(&script, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let session = super::new_session(
+            "12345678-cccc".into(),
+            "Session 12345678".into(),
+            workspace.canonicalize().unwrap(),
+            super::now_epoch(),
+            false,
+            false,
+        );
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert(session.id.clone(), session);
+        let state = super::AppState {
+            pi_bin: script.to_string_lossy().into_owned(),
+            tools: "read".into(),
+            token: "secret".into(),
+            workspaces: std::sync::Arc::new(vec![workspace.canonicalize().unwrap()]),
+            debug_stderr: false,
+            sessions: std::sync::Arc::new(tokio::sync::RwLock::new(sessions)),
+            state_file: dir.join("sessions.json"),
+            epoch: "test-epoch".into(),
+            idle_secs: 0,
+            state_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        };
+
+        let error = super::prompt(
+            State(state),
+            AxumPath("12345678-cccc".into()),
+            Json(super::PromptBody {
+                message: "  ".into(),
+                context: None,
+                images: Vec::new(),
+            }),
+        )
+        .await
+        .expect_err("empty prompt");
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(!marker.exists(), "an invalid prompt must not spawn Pi");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn message_pagination_returns_the_newest_page_first() {
         let full = || {
@@ -3247,11 +3565,42 @@ mod tests {
         git(&["commit", "-qm", "initial"]);
         fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
 
-        let diff = git_diff_output(&dir, &[]).unwrap();
+        let (diff, truncated) = git_diff_limited(&dir, &[], super::MAX_DIFF_BYTES).unwrap();
+        assert!(!truncated);
         assert!(diff.contains("+two"));
-        let files = parse_numstat(&git_diff_output(&dir, &["--numstat"]).unwrap());
+        let numstat = git_diff_limited(&dir, &["--numstat"], super::MAX_DIFF_BYTES)
+            .unwrap()
+            .0;
+        let files = parse_numstat(&numstat);
         assert_eq!(files[0]["path"], "a.txt");
         assert_eq!(files[0]["additions"], 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn diff_capture_stops_at_the_byte_limit() {
+        let dir = temp_dir("git-diff-limit");
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .current_dir(&dir)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(status.status.success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        fs::write(dir.join("big.txt"), "a\n".repeat(4_000)).unwrap();
+        git(&["add", "big.txt"]);
+        git(&["commit", "-qm", "initial"]);
+        fs::write(dir.join("big.txt"), "b\n".repeat(4_000)).unwrap();
+
+        let (diff, truncated) = git_diff_limited(&dir, &[], 1_000).unwrap();
+        assert!(truncated);
+        assert!(diff.len() <= 1_000);
+        let (_, truncated) = git_diff_limited(&dir, &[], super::MAX_DIFF_BYTES).unwrap();
+        assert!(!truncated);
         let _ = fs::remove_dir_all(&dir);
     }
 
