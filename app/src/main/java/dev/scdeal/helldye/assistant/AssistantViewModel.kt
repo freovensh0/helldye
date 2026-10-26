@@ -1022,6 +1022,9 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                         skip = false
                         if (event.payload.optString("type") == "not_started") {
                             notStarted = true
+                            // A gateway restart or the idle reaper can stop Pi while this client
+                            // still believes a run is active. There is no exit event to clear it.
+                            _state.update { it.copy(streaming = false, stopping = false) }
                             return@collect
                         }
                         event.id?.let { GatewaySessionStore.lastEventId = it }
@@ -1041,6 +1044,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                         ) {
                             GatewaySessionStore.reset()
                             streamJob = null
+                            _state.update { it.copy(streaming = false, stopping = false) }
                             return@launch
                         }
                     }
