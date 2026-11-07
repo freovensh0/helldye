@@ -99,12 +99,7 @@
             android:name=".voice.HelldyeRecognitionService"
             android:exported="true"
             android:label="@string/app_name"
-            android:permission="android.permission.BIND_RECOGNITION_SERVICE">
-            <intent-filter>
-                <action android:name="android.speech.RecognitionService" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
-        </service>
+            android:permission="android.permission.BIND_RECOGNITION_SERVICE" />
     </application>
 
 </manifest>

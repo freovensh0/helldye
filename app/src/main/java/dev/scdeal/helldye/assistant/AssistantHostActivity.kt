@@ -149,11 +149,11 @@ abstract class AssistantHostActivity : ComponentActivity() {
             onOpenSessions = viewModel::openSessions,
             onCloseSessions = viewModel::closeSessions,
             onSwitchSession = viewModel::switchSession,
+            onCloseTab = viewModel::closeTab,
             onDeleteSession = viewModel::deleteSession,
             onRenameSession = viewModel::renameSession,
             onLoadOlder = viewModel::loadOlder,
             onImportSessions = viewModel::importSessions,
-            onReadAnswer = viewModel::readLastAnswer,
             onExpand = expandAction,
             onClose = { finish() },
         )
