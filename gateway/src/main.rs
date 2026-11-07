@@ -122,6 +122,8 @@ struct Session {
     on_host: AtomicBool,
     last_model: Mutex<Option<CachedModel>>,
     last_thinking: Mutex<Option<String>>,
+    /// Last `get_session_stats` payload, so a stopped session still shows its context usage.
+    last_stats: Mutex<Option<Value>>,
     /// Per-session tool override. Only an explicit user action sets it; the default is read-only.
     tools_override: Mutex<Option<String>>,
     stdin: Mutex<Option<ChildStdin>>,
@@ -183,6 +185,9 @@ struct StoredSession {
     model: Option<CachedModel>,
     #[serde(default)]
     thinking: Option<String>,
+    /// Last context/token usage, kept for the composer while Pi is stopped.
+    #[serde(default)]
+    stats: Option<Value>,
     /// True when the record came from `HELLDYE_PI_SESSION_DIR`, not from this phone.
     #[serde(default)]
     on_host: bool,
@@ -1669,6 +1674,9 @@ async fn session_state(
             payload["thinkingLevel"] = json!(thinking);
         }
     }
+    if let Some(stats) = session.last_stats.lock().await.clone() {
+        payload["stats"] = stats;
+    }
     Ok(Json(payload))
 }
 
@@ -1718,7 +1726,10 @@ async fn session_stats(
         )
         .await
         .map_err(bad_gateway)?;
-    command_data(response).map(Json)
+    let data = command_data(response)?;
+    *session.last_stats.lock().await = Some(data.clone());
+    persist_sessions(&state).await;
+    Ok(Json(data))
 }
 
 async fn session_thinking(
@@ -2056,6 +2067,7 @@ fn new_session(
         on_host: AtomicBool::new(false),
         last_model: Mutex::new(None),
         last_thinking: Mutex::new(None),
+        last_stats: Mutex::new(None),
         tools_override: Mutex::new(None),
         stdin: Mutex::new(None),
         start: Mutex::new(()),
@@ -2223,6 +2235,7 @@ async fn load_sessions(
                 session.on_host.store(item.on_host, Ordering::SeqCst);
                 *session.last_model.lock().await = item.model;
                 *session.last_thinking.lock().await = item.thinking;
+                *session.last_stats.lock().await = item.stats;
                 if item.allow_edits {
                     if let Ok(tools) = env::var("HELLDYE_ACTION_TOOLS") {
                         *session.tools_override.lock().await = Some(tools);
@@ -2254,6 +2267,7 @@ async fn persist_sessions(state: &AppState) {
             renamed: session.name_is_explicit.load(Ordering::SeqCst),
             model: session.last_model.lock().await.clone(),
             thinking: session.last_thinking.lock().await.clone(),
+            stats: session.last_stats.lock().await.clone(),
             on_host: session.on_host.load(Ordering::SeqCst),
             allow_edits: session.tools_override.lock().await.is_some(),
         });
@@ -2334,9 +2348,31 @@ async fn read_stdout(
             _ => {}
         }
         session.publish(generation, kind.clone(), line).await;
-        if session.ephemeral && kind == "agent_settled" {
-            // The subscriber already has the settled event; the one-shot record is done.
-            remove_ephemeral(&state, &session.id).await;
+        if kind == "agent_settled" {
+            if session.ephemeral {
+                // The subscriber already has the settled event; the one-shot record is done.
+                remove_ephemeral(&state, &session.id).await;
+            } else {
+                // Cache the final usage before the idle reaper can stop the child. The app reads it
+                // from `/state` while the session is stopped.
+                let refresh = session.clone();
+                let refresh_state = state.clone();
+                tokio::spawn(async move {
+                    let Ok(response) = refresh
+                        .request(
+                            json!({ "type": "get_session_stats" }),
+                            Duration::from_secs(10),
+                        )
+                        .await
+                    else {
+                        return;
+                    };
+                    if let Ok(data) = command_data(response) {
+                        *refresh.last_stats.lock().await = Some(data);
+                        persist_sessions(&refresh_state).await;
+                    }
+                });
+            }
         }
     }
 }
@@ -3504,6 +3540,9 @@ mod tests {
             name: "Claude".into(),
         });
         *session.last_thinking.lock().await = Some("high".into());
+        *session.last_stats.lock().await = Some(serde_json::json!({
+            "contextUsage": { "tokens": 1000, "contextWindow": 200000, "percent": 1 }
+        }));
         let mut sessions = std::collections::HashMap::new();
         sessions.insert(session.id.clone(), session);
         let state = super::AppState {
@@ -3529,6 +3568,7 @@ mod tests {
         assert_eq!(value["epoch"], "epoch-a");
         assert_eq!(value["model"]["id"], "claude");
         assert_eq!(value["thinkingLevel"], "high");
+        assert_eq!(value["stats"]["contextUsage"]["percent"], 1);
         assert!(!marker.exists(), "reading state must not spawn Pi");
 
         let Json(messages) = super::session_messages(
