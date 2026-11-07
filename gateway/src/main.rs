@@ -1728,9 +1728,25 @@ async fn session_stats(
         .await
         .map_err(bad_gateway)?;
     let data = command_data(response)?;
-    *session.last_stats.lock().await = Some(data.clone());
-    persist_sessions(&state).await;
+    cache_stats(&session, &state, data.clone()).await;
     Ok(Json(data))
+}
+
+/// Store the latest usage payload and persist only when it actually changed; the settled-turn
+/// refresh and the app's `/stats` read usually race with the same value.
+async fn cache_stats(session: &Arc<Session>, state: &AppState, data: Value) {
+    let changed = {
+        let mut cached = session.last_stats.lock().await;
+        if cached.as_ref() == Some(&data) {
+            false
+        } else {
+            *cached = Some(data);
+            true
+        }
+    };
+    if changed {
+        persist_sessions(state).await;
+    }
 }
 
 async fn session_thinking(
@@ -2423,8 +2439,7 @@ async fn read_stdout(
                         return;
                     };
                     if let Ok(data) = command_data(response) {
-                        *refresh.last_stats.lock().await = Some(data);
-                        persist_sessions(&refresh_state).await;
+                        cache_stats(&refresh, &refresh_state, data).await;
                     }
                 });
             }
