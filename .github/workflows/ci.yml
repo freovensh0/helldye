@@ -80,8 +80,9 @@ jobs:
               run: |
                   gh release create latest --prerelease --title "Latest main build" \
                       --notes "Rolling build from main; assets update on every push." || true
-                  gh release upload latest "app/build/outputs/apk/debug/app-debug.apk#HELLDYE.apk" --clobber
-                  gh release upload latest "scripts/hellgate.sh#hellgate.sh" --clobber
+                  cp app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/HELLDYE.apk"
+                  gh release upload latest "$RUNNER_TEMP/HELLDYE.apk" --clobber
+                  gh release upload latest "scripts/hellgate.sh" --clobber
 
             - name: Upload failure reports
               if: failure()
