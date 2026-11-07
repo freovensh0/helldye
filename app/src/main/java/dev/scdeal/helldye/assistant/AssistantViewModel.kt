@@ -61,6 +61,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     @Volatile
     private var capabilitiesRun = 0
     private var activeAssistantId: String? = null
+    private var retryNotice: String? = null
     private val toolMessages = mutableMapOf<String, String>()
     private val pendingUserEchoes = ConcurrentLinkedQueue<String>()
     // Pi emits one delta per token. Appending each into a new immutable list re-parses markdown and
@@ -116,7 +117,14 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     _state.update { it.copy(error = message.ifBlank { "Could not open the session." }) }
                     return@launch
                 }
-                _state.update { it.copy(sessionId = sessionId) }
+                _state.update {
+                    it.copy(
+                        sessionId = sessionId,
+                        sessionName = info.getOrNull()?.let {
+                            SessionTitle.display(it.name, it.created)
+                        },
+                    )
+                }
                 activeCwd = info.getOrNull()?.cwd?.takeIf { cwd -> cwd.isNotBlank() }
                 attach(gateway, sessionId)
             }
@@ -727,14 +735,19 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             models = previous.models,
             commands = previous.commands,
             thinkingLevels = previous.thinkingLevels,
+            sessions = previous.sessions,
         )
 
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
                 val gateway = ensureClient(config)
                 val session = ensureSession(gateway, config)
+                _state.update {
+                    it.copy(sessionName = SessionTitle.display(session.name, session.created))
+                }
                 startStream(gateway, session.id)
                 refreshCapabilities(gateway, session.id, announce = false)
+                refreshSessions()
             }.onFailure { error ->
                 _state.update {
                     it.copy(error = error.message ?: "Could not start a new session.")
@@ -798,9 +811,13 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         AssistantDraftStore.clear()
         _state.value = AssistantUiState(
             sessionId = sessionId,
+            sessionName = _state.value.sessions
+                .firstOrNull { it.id == sessionId }
+                ?.let { SessionTitle.display(it.name, it.created) },
             models = _state.value.models,
             commands = _state.value.commands,
             thinkingLevels = _state.value.thinkingLevels,
+            sessions = _state.value.sessions,
         )
 
         viewModelScope.launch(Dispatchers.IO) {
@@ -808,6 +825,9 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 val gateway = ensureClient(config)
                 val info = gateway.session(sessionId)
                 activeCwd = info.cwd.takeIf { it.isNotBlank() }
+                _state.update {
+                    it.copy(sessionName = SessionTitle.display(info.name, info.created))
+                }
                 attach(gateway, sessionId)
             }.onFailure { error ->
                 _state.update {
@@ -943,6 +963,11 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                         state.copy(
                             sessions = state.sessions.map {
                                 if (it.id == updated.id) updated else it
+                            },
+                            sessionName = if (state.sessionId == updated.id) {
+                                SessionTitle.display(updated.name, updated.created)
+                            } else {
+                                state.sessionName
                             },
                         )
                     }
@@ -1260,18 +1285,16 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         } else if (snapshot?.started == true) {
             startStream(gateway, sessionId)
         }
-        refreshDiffSummary()
+        refreshSessions()
     }
 
-    private fun refreshDiffSummary() {
+    /** Keeps the session rail current without opening the sheet. */
+    private fun refreshSessions() {
         val gateway = client ?: return
-        val sessionId = GatewaySessionStore.sessionId ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { gateway.diff(sessionId) }
-                .onSuccess { diff ->
-                    if (GatewaySessionStore.sessionId == sessionId) {
-                        _state.update { it.copy(changedFiles = diff.files) }
-                    }
+            runCatching { gateway.sessions() }
+                .onSuccess { sessions ->
+                    _state.update { it.copy(sessions = sessions) }
                 }
         }
     }
@@ -1409,6 +1432,29 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    /** Provider failures belong in the conversation, not only in a transient status rail. */
+    private fun showProviderError(message: String?) {
+        val text = message?.trim().orEmpty().ifBlank { "The provider returned an error." }
+        flushDeltas()
+        activeAssistantId = null
+        _state.update { state ->
+            val last = state.messages.lastOrNull()
+            if (last?.role == ChatRole.Error && last.text == text) {
+                state
+            } else {
+                state.copy(
+                    messages = state.messages.filterNot {
+                        it.role == ChatRole.Assistant && it.text.isBlank() && it.thinking.isBlank()
+                    } + ChatMessage(
+                        id = UUID.randomUUID().toString(),
+                        role = ChatRole.Error,
+                        text = text,
+                    ),
+                )
+            }
+        }
+    }
+
     private fun handleEvent(event: GatewayEvent) {
         val payload = event.payload
         when (payload.optString("type")) {
@@ -1417,11 +1463,18 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             "agent_settled" -> {
                 flushDeltas()
                 activeAssistantId = null
+                val retry = retryNotice
+                retryNotice = null
                 pendingUserEchoes.clear()
                 settings.clearPendingSubmit()
-                _state.update { it.copy(streaming = false, stopping = false) }
+                _state.update {
+                    it.copy(
+                        streaming = false,
+                        stopping = false,
+                        notice = if (retry != null && it.notice == retry) null else it.notice,
+                    )
+                }
                 refreshStats()
-                refreshDiffSummary()
             }
             "extension_ui_request" -> handleExtensionRequest(payload)
             "message_start" -> {
@@ -1457,6 +1510,17 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     "text_end" -> replaceAssistantText(update.optString("content"))
                     "thinking_delta" -> appendThinking(update.optString("delta"))
                     "thinking_end" -> replaceThinking(update.optString("content"))
+                    "error" -> {
+                        if (update.optString("reason") != "aborted") {
+                            showProviderError(
+                                update.optString("errorMessage").ifBlank {
+                                    update.optString("error").ifBlank {
+                                        payload.optString("errorMessage")
+                                    }
+                                },
+                            )
+                        }
+                    }
                 }
             }
             "message_end" -> {
@@ -1472,6 +1536,13 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                         )
                     }
                     activeAssistantId = null
+                    if (message.optString("stopReason") == "error") {
+                        showProviderError(
+                            message.optString("errorMessage").ifBlank {
+                                payload.optString("errorMessage")
+                            },
+                        )
+                    }
                 }
             }
             "tool_execution_start" -> {
@@ -1549,6 +1620,33 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 val steering = payload.optJSONArray("steering")?.length() ?: 0
                 val followUp = payload.optJSONArray("followUp")?.length() ?: 0
                 _state.update { it.copy(queued = steering + followUp) }
+            }
+            "auto_retry_start" -> {
+                // The provider rejected the request and Pi is retrying. Keep the final error for
+                // `auto_retry_end`; the status rail is enough while a retry is in flight.
+                val message = payload.optString("errorMessage").takeIf { it.isNotBlank() }
+                if (message != null) {
+                    retryNotice = message
+                    _state.update {
+                        it.copy(notice = message, noticeTone = NoticeTone.Warning)
+                    }
+                }
+            }
+            "auto_retry_end" -> {
+                val shown = retryNotice
+                retryNotice = null
+                if (shown != null) {
+                    _state.update {
+                        if (it.notice == shown) it.copy(notice = null) else it
+                    }
+                }
+                if (!payload.optBoolean("success", true)) {
+                    showProviderError(payload.optString("finalError"))
+                }
+            }
+            "extension_error" -> {
+                val error = payload.optString("error").ifBlank { "An extension failed." }
+                showProviderError(error)
             }
             "thinking_level_changed" -> {
                 val level = payload.optString("level").takeIf { it.isNotBlank() }

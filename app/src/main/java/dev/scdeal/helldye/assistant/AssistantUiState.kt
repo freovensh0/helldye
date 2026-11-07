@@ -8,7 +8,7 @@ import dev.scdeal.helldye.gateway.GatewayTree
 import dev.scdeal.helldye.gateway.GatewaySession
 import dev.scdeal.helldye.gateway.GatewayStats
 
-enum class ChatRole { User, Assistant, Tool }
+enum class ChatRole { User, Assistant, Tool, Error }
 
 data class ChatMessage(
     val id: String,
@@ -64,6 +64,7 @@ data class AssistantUiState(
     val notice: String? = null,
     val error: String? = null,
     val sessionId: String? = null,
+    val sessionName: String? = null,
     val models: List<GatewayModel> = emptyList(),
     val commands: List<GatewayCommand> = emptyList(),
     val currentModel: GatewayModel? = null,

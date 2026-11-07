@@ -12,6 +12,13 @@ import android.util.Base64
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -63,13 +70,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
@@ -98,14 +105,13 @@ import dev.scdeal.helldye.assistant.SlashCommand
 import dev.scdeal.helldye.assistant.SlashCommands
 import dev.scdeal.helldye.assistant.ToolInfo
 import dev.scdeal.helldye.assistant.ToolSummary
+import dev.scdeal.helldye.assistant.SessionTitle
 import dev.scdeal.helldye.assistant.UsageSummary
-import dev.scdeal.helldye.gateway.GatewayDiff
 import dev.scdeal.helldye.gateway.GatewayModel
 import dev.scdeal.helldye.gateway.GatewaySession
 import dev.scdeal.helldye.ui.components.Hairline
 import dev.scdeal.helldye.ui.components.SectionLabel
 import dev.scdeal.helldye.ui.components.WarningBanner
-import dev.scdeal.helldye.ui.components.Wordmark
 import dev.scdeal.helldye.ui.markdown.MarkdownText
 import dev.scdeal.helldye.ui.theme.HelldyeColors
 import dev.scdeal.helldye.ui.theme.HelldyeDimens
@@ -120,7 +126,6 @@ import java.util.Locale
 
 @Composable
 fun AssistantScreen(
-    overlay: Boolean,
     screenshot: Bitmap?,
     screenState: ScreenCaptureState,
     state: AssistantUiState,
@@ -129,13 +134,13 @@ fun AssistantScreen(
     onAddAttachment: (Attachment) -> Unit,
     onRemoveAttachment: (Int) -> Unit,
     onRemoveScreenshot: () -> Unit,
+    onUseScreenshot: () -> Unit,
     onNotice: (String) -> Unit,
     onDismissNotice: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenModelPicker: () -> Unit,
     onCloseModelPicker: () -> Unit,
     onSelectModel: (GatewayModel) -> Unit,
-    onSetAllowEdits: (Boolean) -> Unit,
     onOpenThinkingPicker: () -> Unit,
     onCloseThinkingPicker: () -> Unit,
     onSelectThinking: (String) -> Unit,
@@ -153,17 +158,12 @@ fun AssistantScreen(
     onRenameSession: (String, String) -> Unit,
     onLoadOlder: () -> Unit,
     onImportSessions: () -> Unit,
-    onOpenDiff: () -> Unit,
-    onCloseDiff: () -> Unit,
-    onOpenTree: () -> Unit,
-    onCloseTree: () -> Unit,
-    onExport: () -> Unit,
-    onExportConsumed: () -> Unit,
     onReadAnswer: () -> Unit,
     onExpand: (() -> Unit)?,
     onClose: () -> Unit,
 ) {
     var input by rememberSaveable { mutableStateOf("") }
+    var listening by remember { mutableStateOf(false) }
     var attachmentMenu by rememberSaveable { mutableStateOf(false) }
     var overflowOpen by rememberSaveable { mutableStateOf(false) }
     var pinnedToBottom by rememberSaveable { mutableStateOf(true) }
@@ -171,20 +171,6 @@ fun AssistantScreen(
     val keyboard = LocalSoftwareKeyboardController.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val exportLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("text/html"),
-    ) { uri ->
-        val html = state.exportHtml
-        if (uri != null && html != null) {
-            runCatching {
-                context.contentResolver.openOutputStream(uri)?.use { it.write(html.toByteArray()) }
-            }.onFailure { onNotice("Could not save the export.") }
-        }
-        onExportConsumed()
-    }
-    LaunchedEffect(state.exportHtml) {
-        if (state.exportHtml != null) exportLauncher.launch("helldye-session.html")
-    }
 
     fun runCommand(text: String): Boolean {
         when (text.trim()) {
@@ -285,8 +271,15 @@ fun AssistantScreen(
     }
 
     val speech = rememberSpeechInput(
-        onResult = { input = it },
-        onError = { onNotice(it) },
+        onResult = {
+            listening = false
+            input = it
+        },
+        onListening = { listening = it },
+        onError = {
+            listening = false
+            onNotice(it)
+        },
     )
     val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
@@ -322,6 +315,7 @@ fun AssistantScreen(
         state.screenQuery -> "TEMP"
         state.stopping -> "STOPPING"
         state.streaming -> "THINKING"
+        screenState == ScreenCaptureState.Available -> "SCREEN"
         screenState == ScreenCaptureState.Ready || screenState == ScreenCaptureState.Sent -> "TEMP"
         else -> "READY"
     }
@@ -376,16 +370,23 @@ fun AssistantScreen(
                     .weight(1f),
             ) {
                 TopRail(
-                    sessionId = state.sessionId,
+                    sessionName = state.sessionName,
                     stateLabel = railState,
-                    closeLabel = if (overlay) "Close assistant" else "Back",
                     onOpenOverflow = { overflowOpen = true },
-                    onClose = onClose,
                 )
                 Hairline(color = HelldyeColors.LineSoft)
 
-                Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                    LazyColumn(
+                Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    if (state.sessions.size > 1) {
+                        SessionRail(
+                            sessions = state.sessions,
+                            currentId = state.sessionId,
+                            onSwitch = onSwitchSession,
+                            onNew = onNewSession,
+                        )
+                    }
+                    Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                        LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(
@@ -412,27 +413,23 @@ fun AssistantScreen(
                                 }
                             }
                         }
-                        if (state.messages.isEmpty() && state.screenMessages.isEmpty()) {
-                            item(key = "empty") {
-                                EmptyState(
-                                    overlay = overlay,
-                                    screenState = screenState,
-                                )
-                            }
-                        }
                         items(
                             items = conversation,
                             key = { it.key },
                             contentType = { if (it is ConversationItem.Tools) "tools" else "turn" },
                         ) { item ->
-                            when (item) {
-                                is ConversationItem.Turn -> TurnBlock(item.message, state.streaming)
-                                is ConversationItem.Tools -> ToolGroupBlock(item)
+                            Box(Modifier.fillMaxWidth().animateItem()) {
+                                when (item) {
+                                    is ConversationItem.Turn -> TurnBlock(item.message, state.streaming)
+                                    is ConversationItem.Tools -> ToolGroupBlock(item)
+                                }
                             }
                         }
                         if (state.streaming && lastMessage?.role == ChatRole.User) {
                             item(key = "waiting") {
-                                WaitingAnswer()
+                                Box(Modifier.fillMaxWidth().animateItem()) {
+                                    WaitingAnswer()
+                                }
                             }
                         }
                     }
@@ -455,6 +452,7 @@ fun AssistantScreen(
                             )
                         }
                     }
+                    }
                 }
 
                 BottomPanel(
@@ -465,6 +463,7 @@ fun AssistantScreen(
                     showSlash = showSlash,
                     slashEntries = slashEntries,
                     input = input,
+                    listening = listening,
                     onInputChange = {
                         input = it
                         onDraftChange(it)
@@ -504,9 +503,9 @@ fun AssistantScreen(
                     },
                     onRemoveAttachment = onRemoveAttachment,
                     onRemoveScreenshot = onRemoveScreenshot,
+                    onUseScreenshot = onUseScreenshot,
                     onDismissNotice = onDismissNotice,
                     onOpenModelPicker = onOpenModelPicker,
-                    onOpenDiff = onOpenDiff,
                     onSlashSelect = { entry ->
                         if (runCommand(entry.command)) {
                             keyboard?.hide()
@@ -518,38 +517,25 @@ fun AssistantScreen(
             }
         }
 
-        if (overflowOpen) {
+        AnimatedVisibility(
+            visible = overflowOpen,
+            enter = fadeIn(tween(120)),
+            exit = fadeOut(tween(100)),
+        ) {
             OverflowMenu(
                 onOpenSessions = onOpenSessions,
                 onOpenSettings = onOpenSettings,
-                onOpenDiff = onOpenDiff,
-                onOpenTree = onOpenTree,
-                onExport = onExport,
                 onReadAnswer = onReadAnswer,
                 onExpand = onExpand,
                 onDismiss = { overflowOpen = false },
             )
         }
 
-        if (state.diffOpen) {
-            DiffSheet(
-                diff = state.diff,
-                loading = state.diffLoading,
-                error = state.diffError,
-                onClose = onCloseDiff,
-            )
-        }
-
-        if (state.treeOpen) {
-            TreeSheet(
-                tree = state.tree,
-                loading = state.treeLoading,
-                error = state.treeError,
-                onClose = onCloseTree,
-            )
-        }
-
-        if (state.sessionsOpen) {
+        AnimatedVisibility(
+            visible = state.sessionsOpen,
+            enter = fadeIn(tween(140)),
+            exit = fadeOut(tween(120)),
+        ) {
             SessionSheet(
                 sessions = state.sessions,
                 currentId = state.sessionId,
@@ -563,28 +549,29 @@ fun AssistantScreen(
             )
         }
 
-        if (state.modelPickerOpen) {
+        AnimatedVisibility(
+            visible = state.modelPickerOpen,
+            enter = fadeIn(tween(140)) + scaleIn(tween(140), initialScale = 0.98f),
+            exit = fadeOut(tween(120)) + scaleOut(tween(120), targetScale = 0.98f),
+        ) {
             ModelPicker(
                 models = state.models,
                 current = state.currentModel,
                 loading = state.capabilitiesLoading,
                 error = state.error,
                 thinking = state.thinkingLevel,
-                allowEdits = state.allowEdits,
-                editsBusy = state.editsBusy,
-                canChangeEdits = !state.streaming && !state.stopping && !state.offline,
-                offline = state.offline,
-                onOpenThinking = {
-                    onCloseModelPicker()
-                    onOpenThinkingPicker()
-                },
-                onSetAllowEdits = onSetAllowEdits,
+                thinkingLevels = state.thinkingLevels,
+                onSelectThinking = onSelectThinking,
                 onSelect = onSelectModel,
                 onClose = onCloseModelPicker,
             )
         }
 
-        if (state.thinkingPickerOpen) {
+        AnimatedVisibility(
+            visible = state.thinkingPickerOpen,
+            enter = fadeIn(tween(140)) + scaleIn(tween(140), initialScale = 0.98f),
+            exit = fadeOut(tween(120)) + scaleOut(tween(120), targetScale = 0.98f),
+        ) {
             ThinkingPicker(
                 levels = state.thinkingLevels,
                 current = state.thinkingLevel,
@@ -607,23 +594,16 @@ fun AssistantScreen(
 
 @Composable
 private fun TopRail(
-    sessionId: String?,
+    sessionName: String?,
     stateLabel: String,
-    closeLabel: String,
     onOpenOverflow: () -> Unit,
-    onClose: () -> Unit,
 ) {
-    val sessionTitle = sessionId
-        ?.take(4)
-        ?.uppercase(Locale.ROOT)
-        ?.let { "SESSION $it" }
-        ?: "NO SESSION"
+    val title = sessionName?.takeIf { it.isNotBlank() } ?: "NEW SESSION"
     val stateColor = when (stateLabel) {
         "THINKING" -> HelldyeColors.Text
         "TEMP" -> HelldyeColors.TextMuted
         else -> HelldyeColors.TextSecondary
     }
-    val showWordmark = LocalDensity.current.fontScale < 1.5f
 
     Row(
         modifier = Modifier
@@ -632,14 +612,10 @@ private fun TopRail(
             .padding(horizontal = HelldyeDimens.ScreenPadding),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (showWordmark) {
-            Wordmark()
-            Spacer(Modifier.width(HelldyeDimens.Lg))
-        }
         Text(
-            text = sessionTitle,
-            style = MaterialTheme.typography.bodyMedium,
-            color = HelldyeColors.TextSecondary,
+            text = title,
+            style = MaterialTheme.typography.titleMedium,
+            color = HelldyeColors.Text,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
@@ -664,17 +640,6 @@ private fun TopRail(
                 modifier = Modifier.size(18.dp),
             )
         }
-        IconButton(
-            onClick = onClose,
-            modifier = Modifier.size(HelldyeDimens.TouchTarget),
-        ) {
-            Icon(
-                painter = painterResource(R.drawable.ic_close),
-                contentDescription = closeLabel,
-                tint = HelldyeColors.TextSecondary,
-                modifier = Modifier.size(18.dp),
-            )
-        }
     }
 }
 
@@ -682,9 +647,6 @@ private fun TopRail(
 private fun OverflowMenu(
     onOpenSessions: () -> Unit,
     onOpenSettings: () -> Unit,
-    onOpenDiff: () -> Unit,
-    onOpenTree: () -> Unit,
-    onExport: () -> Unit,
     onReadAnswer: () -> Unit,
     onExpand: (() -> Unit)?,
     onDismiss: () -> Unit,
@@ -713,28 +675,13 @@ private fun OverflowMenu(
                 onOpenSettings()
             }
             Hairline(color = HelldyeColors.LineSoft)
-            OverflowRow("DIFF") {
-                onDismiss()
-                onOpenDiff()
-            }
-            Hairline(color = HelldyeColors.LineSoft)
-            OverflowRow("SESSION TREE") {
-                onDismiss()
-                onOpenTree()
-            }
-            Hairline(color = HelldyeColors.LineSoft)
-            OverflowRow("EXPORT HTML") {
-                onDismiss()
-                onExport()
-            }
-            Hairline(color = HelldyeColors.LineSoft)
             OverflowRow("READ ANSWER") {
                 onDismiss()
                 onReadAnswer()
             }
             if (onExpand != null) {
                 Hairline(color = HelldyeColors.LineSoft)
-                OverflowRow("OPEN SESSION") {
+                OverflowRow("FULL SCREEN") {
                     onDismiss()
                     onExpand()
                 }
@@ -762,45 +709,6 @@ private fun OverflowRow(label: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun EmptyState(
-    overlay: Boolean,
-    screenState: ScreenCaptureState,
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = HelldyeDimens.Xl),
-    ) {
-        Text(
-            text = "READY",
-            style = MaterialTheme.typography.displayLarge,
-            color = HelldyeColors.Text,
-        )
-        Spacer(Modifier.height(HelldyeDimens.Md))
-        Text(
-            text = "Ask about the screen, or type.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = HelldyeColors.TextSecondary,
-        )
-        Spacer(Modifier.height(HelldyeDimens.Xs))
-        Text(
-            text = when {
-                !overlay -> "Nothing leaves this phone unless you send it."
-                screenState == ScreenCaptureState.Ready ->
-                    "One screenshot is staged. It is sent only when you send."
-                screenState == ScreenCaptureState.Blocked ->
-                    "This screen does not allow screenshots."
-                screenState == ScreenCaptureState.Off ->
-                    "No screenshot is available for this request."
-                else -> "Screenshots stay on this phone until you send."
-            },
-            style = MaterialTheme.typography.bodyMedium,
-            color = HelldyeColors.TextMuted,
-        )
-    }
-}
-
-@Composable
 private fun TurnBlock(message: ChatMessage, streaming: Boolean) {
     Column(Modifier.fillMaxWidth()) {
         if (message.thinking.isNotBlank()) {
@@ -810,7 +718,30 @@ private fun TurnBlock(message: ChatMessage, streaming: Boolean) {
             ChatRole.User -> UserTurn(message.text)
             ChatRole.Assistant -> AssistantTurn(message, streaming)
             ChatRole.Tool -> message.tool?.let { ToolRow(message.id, it) }
+            ChatRole.Error -> ErrorTurn(message.text)
         }
+    }
+}
+
+@Composable
+private fun ErrorTurn(text: String) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, HelldyeColors.SignalLine, RoundedCornerShape(2.dp))
+            .padding(HelldyeDimens.Md),
+    ) {
+        Text(
+            text = "ERROR",
+            style = MaterialTheme.typography.labelSmall,
+            color = HelldyeColors.Signal,
+        )
+        Spacer(Modifier.height(HelldyeDimens.Xs))
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodyMedium,
+            color = HelldyeColors.TextSecondary,
+        )
     }
 }
 
@@ -1054,6 +985,7 @@ private fun BottomPanel(
     showSlash: Boolean,
     slashEntries: List<SlashCommand>,
     input: String,
+    listening: Boolean,
     onInputChange: (String) -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
@@ -1065,9 +997,9 @@ private fun BottomPanel(
     onPaste: () -> Unit,
     onRemoveAttachment: (Int) -> Unit,
     onRemoveScreenshot: () -> Unit,
+    onUseScreenshot: () -> Unit,
     onDismissNotice: () -> Unit,
     onOpenModelPicker: () -> Unit,
-    onOpenDiff: () -> Unit,
     onSlashSelect: (SlashCommand) -> Unit,
 ) {
     val statuses = buildList {
@@ -1083,7 +1015,8 @@ private fun BottomPanel(
     ).ifEmpty { "MODEL · THINKING · CONTEXT" }
     val railMessage = state.error ?: state.notice
     val railSignal = state.error != null || state.noticeTone != NoticeTone.Info
-    val showStrip = screenState == ScreenCaptureState.Ready ||
+    val showStrip = screenState == ScreenCaptureState.Available ||
+        screenState == ScreenCaptureState.Ready ||
         screenState == ScreenCaptureState.Blocked ||
         screenState == ScreenCaptureState.Off
 
@@ -1097,15 +1030,24 @@ private fun BottomPanel(
 
         if (showStrip) {
             ScreenshotStrip(
-                preview = if (screenState == ScreenCaptureState.Ready) screenshot else null,
+                preview = if (screenState == ScreenCaptureState.Ready ||
+                    screenState == ScreenCaptureState.Available
+                ) {
+                    screenshot
+                } else {
+                    null
+                },
                 state = screenState,
                 detail = screenshot?.let {
-                    if (screenState == ScreenCaptureState.Ready) {
+                    if (screenState == ScreenCaptureState.Ready ||
+                        screenState == ScreenCaptureState.Available
+                    ) {
                         "${it.width} × ${it.height}"
                     } else {
                         null
                     }
                 },
+                onUse = onUseScreenshot,
                 onRemove = onRemoveScreenshot,
             )
             if (screenState == ScreenCaptureState.Blocked) {
@@ -1160,24 +1102,6 @@ private fun BottomPanel(
             )
         }
 
-        if (state.changedFiles.isNotEmpty()) {
-            val additions = state.changedFiles.sumOf { it.additions }
-            val deletions = state.changedFiles.sumOf { it.deletions }
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = HelldyeDimens.TouchTarget)
-                    .clickable(role = Role.Button, onClick = onOpenDiff)
-                    .padding(horizontal = HelldyeDimens.Xs),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = "${state.changedFiles.size} FILES · +$additions −$deletions",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = HelldyeColors.TextMuted,
-                )
-            }
-        }
         StatusLine(text = statusText, onClick = onOpenModelPicker)
 
         Composer(
@@ -1186,6 +1110,7 @@ private fun BottomPanel(
             onSend = onSend,
             onStop = onStop,
             onVoice = onVoice,
+            listening = listening,
             streaming = state.streaming,
             sendEnabled = input.isNotBlank() || state.attachments.isNotEmpty() ||
                 screenState == ScreenCaptureState.Ready,
@@ -1201,10 +1126,12 @@ private fun ScreenshotStrip(
     preview: Bitmap?,
     state: ScreenCaptureState,
     detail: String?,
+    onUse: () -> Unit,
     onRemove: () -> Unit,
 ) {
     val label = when (state) {
-        ScreenCaptureState.Ready, ScreenCaptureState.Sent -> "TEMP"
+        ScreenCaptureState.Available -> "AVAILABLE"
+        ScreenCaptureState.Ready, ScreenCaptureState.Sent -> "ON"
         ScreenCaptureState.Off -> "OFF"
         ScreenCaptureState.Blocked -> "BLOCKED"
         ScreenCaptureState.None -> return
@@ -1263,6 +1190,18 @@ private fun ScreenshotStrip(
             )
         } else {
             Spacer(Modifier.weight(1f))
+        }
+        if (state == ScreenCaptureState.Available) {
+            TextButton(
+                onClick = onUse,
+                modifier = Modifier.heightIn(min = HelldyeDimens.TouchTarget),
+            ) {
+                Text(
+                    text = "USE",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = HelldyeColors.Text,
+                )
+            }
         }
         IconButton(
             onClick = onRemove,
@@ -1328,16 +1267,19 @@ private fun StatusRail(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = HelldyeDimens.TouchTarget),
-        verticalAlignment = Alignment.CenterVertically,
+            .heightIn(min = HelldyeDimens.TouchTarget)
+            .animateContentSize(),
+        verticalAlignment = Alignment.Top,
     ) {
         Text(
             text = message,
             style = MaterialTheme.typography.bodyMedium,
             color = if (signal) HelldyeColors.Signal else HelldyeColors.TextMuted,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
+            modifier = Modifier
+                .weight(1f)
+                .heightIn(max = 160.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(vertical = HelldyeDimens.Xs),
         )
         TextButton(
             onClick = onDismiss,
@@ -1449,242 +1391,64 @@ private fun SlashPalette(
 }
 
 @Composable
-private fun TreeSheet(
-    tree: dev.scdeal.helldye.gateway.GatewayTree?,
-    loading: Boolean,
-    error: String?,
-    onClose: () -> Unit,
+private fun SessionRail(
+    sessions: List<GatewaySession>,
+    currentId: String?,
+    onSwitch: (String) -> Unit,
+    onNew: () -> Unit,
 ) {
-    Box(
+    LazyColumn(
         modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.72f)),
-        contentAlignment = Alignment.BottomCenter,
+            .width(96.dp)
+            .fillMaxHeight()
+            .drawBehind {
+                drawRect(
+                    color = HelldyeColors.LineSoft,
+                    topLeft = Offset(size.width - 1.dp.toPx(), 0f),
+                    size = Size(1.dp.toPx(), size.height),
+                )
+            },
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .fillMaxHeight(0.9f)
-                .background(
-                    color = HelldyeColors.Black,
-                    shape = RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp),
-                )
-                .border(1.dp, HelldyeColors.Line, RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp))
-                .windowInsetsPadding(WindowInsets.safeDrawing)
-                .padding(horizontal = HelldyeDimens.ScreenPadding),
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(HelldyeDimens.TopBar),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                SectionLabel("SESSION TREE")
-                Spacer(Modifier.weight(1f))
-                TextButton(
-                    onClick = onClose,
-                    modifier = Modifier.heightIn(min = HelldyeDimens.TouchTarget),
-                ) {
-                    Text(
-                        text = "CLOSE",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = HelldyeColors.TextSecondary,
-                    )
-                }
-            }
-            Hairline(color = HelldyeColors.LineSoft)
-            val current = tree
-            when {
-                loading && current == null -> Text(
-                    text = "LOADING",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = HelldyeColors.TextMuted,
-                    modifier = Modifier.padding(vertical = HelldyeDimens.Lg),
-                )
-                current == null -> Text(
-                    text = error ?: "No entries.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = if (error != null) HelldyeColors.Signal else HelldyeColors.TextMuted,
-                    modifier = Modifier.padding(vertical = HelldyeDimens.Lg),
-                )
-                else -> Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .verticalScroll(rememberScrollState()),
-                ) {
-                    current.nodes.forEach { node ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(
-                                    start = (node.depth.coerceAtMost(12) * 12).dp,
-                                    top = HelldyeDimens.Xs,
-                                    bottom = HelldyeDimens.Xs,
-                                ),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            if (node.leaf) {
-                                Box(
-                                    Modifier
-                                        .width(2.dp)
-                                        .height(18.dp)
-                                        .background(HelldyeColors.White),
-                                )
-                                Spacer(Modifier.width(HelldyeDimens.Sm))
-                            }
-                            Text(
-                                text = buildString {
-                                    append(node.type.uppercase(Locale.ROOT))
-                                    node.role?.let { append(" · ").append(it.uppercase(Locale.ROOT)) }
-                                    node.label?.let { append(" · ").append(it) }
-                                },
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (node.leaf) HelldyeColors.Text else HelldyeColors.TextMuted,
-                                maxLines = 1,
-                                modifier = Modifier.weight(1f),
-                            )
-                            Text(
-                                text = node.id.take(8),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = HelldyeColors.TextMuted,
-                            )
-                        }
-                    }
-                    Spacer(Modifier.height(HelldyeDimens.Lg))
-                }
-            }
+        item(key = "rail-new") {
+            SessionTab(label = "+ NEW", active = false, onClick = onNew)
+        }
+        items(sessions, key = { it.id }) { session ->
+            SessionTab(
+                label = SessionTitle.display(session.name, session.created),
+                active = session.id == currentId,
+                onClick = { onSwitch(session.id) },
+            )
         }
     }
 }
 
 @Composable
-private fun DiffSheet(
-    diff: GatewayDiff?,
-    loading: Boolean,
-    error: String?,
-    onClose: () -> Unit,
-) {
+private fun SessionTab(label: String, active: Boolean, onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.72f)),
-        contentAlignment = Alignment.BottomCenter,
+            .fillMaxWidth()
+            .heightIn(min = 64.dp)
+            .drawBehind {
+                if (active) {
+                    drawRect(HelldyeColors.White, size = Size(2.dp.toPx(), size.height))
+                }
+                drawRect(
+                    HelldyeColors.LineSoft,
+                    topLeft = Offset(0f, size.height - 1.dp.toPx()),
+                    size = Size(size.width, 1.dp.toPx()),
+                )
+            }
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = HelldyeDimens.Sm, vertical = HelldyeDimens.Sm),
+        contentAlignment = Alignment.CenterStart,
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .fillMaxHeight(0.9f)
-                .background(
-                    color = HelldyeColors.Black,
-                    shape = RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp),
-                )
-                .border(1.dp, HelldyeColors.Line, RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp))
-                .windowInsetsPadding(WindowInsets.safeDrawing)
-                .padding(horizontal = HelldyeDimens.ScreenPadding),
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(HelldyeDimens.TopBar),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                SectionLabel("WORKSPACE DIFF")
-                Spacer(Modifier.weight(1f))
-                TextButton(
-                    onClick = onClose,
-                    modifier = Modifier.heightIn(min = HelldyeDimens.TouchTarget),
-                ) {
-                    Text(
-                        text = "CLOSE",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = HelldyeColors.TextSecondary,
-                    )
-                }
-            }
-            Hairline(color = HelldyeColors.LineSoft)
-            val current = diff
-            when {
-                loading && current == null -> Text(
-                    text = "LOADING",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = HelldyeColors.TextMuted,
-                    modifier = Modifier.padding(vertical = HelldyeDimens.Lg),
-                )
-                current == null -> Text(
-                    text = error ?: "No changes.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = if (error != null) HelldyeColors.Signal else HelldyeColors.TextMuted,
-                    modifier = Modifier.padding(vertical = HelldyeDimens.Lg),
-                )
-                else -> {
-                    val additions = current.files.sumOf { it.additions }
-                    val deletions = current.files.sumOf { it.deletions }
-                    Text(
-                        text = "${current.files.size} FILES · +$additions −$deletions",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = HelldyeColors.TextMuted,
-                        modifier = Modifier.padding(top = HelldyeDimens.Sm),
-                    )
-                    if (current.truncated) {
-                        Text(
-                            text = "Diff truncated at 200 KB.",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = HelldyeColors.TextMuted,
-                        )
-                    }
-                    if (error != null) {
-                        Text(
-                            text = error,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = HelldyeColors.Signal,
-                        )
-                    }
-                    Column(
-                        modifier = Modifier
-                            .weight(1f)
-                            .verticalScroll(rememberScrollState()),
-                    ) {
-                        current.files.forEach { file ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = HelldyeDimens.Xs),
-                            ) {
-                                Text(
-                                    text = file.path,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = HelldyeColors.Text,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f),
-                                )
-                                Text(
-                                    text = if (file.binary) {
-                                        "BINARY"
-                                    } else {
-                                        "+${file.additions} −${file.deletions}"
-                                    },
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = HelldyeColors.TextMuted,
-                                )
-                            }
-                        }
-                        if (current.text.isNotEmpty()) {
-                            Spacer(Modifier.height(HelldyeDimens.Sm))
-                            Hairline(color = HelldyeColors.LineSoft)
-                            Spacer(Modifier.height(HelldyeDimens.Sm))
-                            Text(
-                                text = current.text,
-                                style = MaterialTheme.typography.bodySmall.copy(
-                                    fontFamily = dev.scdeal.helldye.ui.theme.JetBrainsMono,
-                                ),
-                                color = HelldyeColors.TextSecondary,
-                            )
-                        }
-                    }
-                }
-            }
-        }
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (active) HelldyeColors.Text else HelldyeColors.TextSecondary,
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -2055,17 +1819,16 @@ private fun ModelPicker(
     loading: Boolean,
     error: String?,
     thinking: String?,
-    allowEdits: Boolean,
-    editsBusy: Boolean,
-    canChangeEdits: Boolean,
-    offline: Boolean,
-    onOpenThinking: () -> Unit,
-    onSetAllowEdits: (Boolean) -> Unit,
+    thinkingLevels: List<String>,
+    onSelectThinking: (String) -> Unit,
     onSelect: (GatewayModel) -> Unit,
     onClose: () -> Unit,
 ) {
     var query by rememberSaveable { mutableStateOf("") }
     val visible = remember(models, query) { ModelSearch.filter(models, query) }
+    val grouped = remember(visible) {
+        visible.groupBy { it.provider }.toSortedMap(String.CASE_INSENSITIVE_ORDER)
+    }
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -2108,92 +1871,43 @@ private fun ModelPicker(
                 placeholder = "Search provider or model",
             )
             Hairline(color = HelldyeColors.LineSoft)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 56.dp)
-                    .clickable(role = Role.Button, onClick = onOpenThinking)
-                    .padding(horizontal = HelldyeDimens.Xs),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = "THINKING",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = HelldyeColors.TextMuted,
-                )
-                Spacer(Modifier.weight(1f))
-                Text(
-                    text = thinking?.uppercase(Locale.ROOT) ?: "DEFAULT",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = HelldyeColors.TextSecondary,
-                )
-            }
-            Hairline(color = HelldyeColors.LineSoft)
-
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .then(
-                        if (allowEdits) {
-                            Modifier.border(
-                                1.dp,
-                                HelldyeColors.SignalLine,
-                                RoundedCornerShape(2.dp),
-                            )
-                        } else {
-                            Modifier
-                        },
-                    )
-                    .toggleable(
-                        value = allowEdits,
-                        enabled = canChangeEdits && !editsBusy,
-                        role = Role.Switch,
-                        onValueChange = onSetAllowEdits,
-                    )
-                    .padding(horizontal = HelldyeDimens.Xs, vertical = HelldyeDimens.Sm),
-            ) {
+            if (thinkingLevels.isNotEmpty()) {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 56.dp)
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = HelldyeDimens.Xs),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        text = "FILE EDITS",
+                        text = "THINKING",
                         style = MaterialTheme.typography.labelMedium,
                         color = HelldyeColors.TextMuted,
                     )
-                    Spacer(Modifier.weight(1f))
-                    Text(
-                        text = when {
-                            editsBusy -> "APPLYING"
-                            allowEdits -> "ALLOWED"
-                            else -> "READ-ONLY"
-                        },
-                        style = MaterialTheme.typography.labelMedium,
-                        color = if (allowEdits) HelldyeColors.Signal else HelldyeColors.TextSecondary,
-                    )
+                    Spacer(Modifier.width(HelldyeDimens.Sm))
+                    thinkingLevels.forEach { level ->
+                        Box(
+                            modifier = Modifier
+                                .heightIn(min = HelldyeDimens.TouchTarget)
+                                .clickable(role = Role.Button) { onSelectThinking(level) }
+                                .padding(horizontal = HelldyeDimens.Sm),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = level.uppercase(Locale.ROOT),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (level == thinking) {
+                                    HelldyeColors.Text
+                                } else {
+                                    HelldyeColors.TextMuted
+                                },
+                            )
+                        }
+                    }
                 }
-                Text(
-                    text = when {
-                        editsBusy -> "Stopping Pi and applying the new tool set."
-                        allowEdits -> "Pi can edit files in this workspace."
-                        else -> "Read-only tools unless the gateway default allows more."
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (allowEdits) HelldyeColors.Signal else HelldyeColors.TextMuted,
-                )
-                if (!canChangeEdits && !editsBusy) {
-                    Text(
-                        text = if (offline) {
-                            "Reconnect to change tool permissions."
-                        } else {
-                            "Stop the active run first."
-                        },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = HelldyeColors.TextMuted,
-                    )
-                }
+                Hairline(color = HelldyeColors.LineSoft)
             }
-            Hairline(color = HelldyeColors.LineSoft)
 
             when {
                 loading && models.isEmpty() -> Text(
@@ -2212,63 +1926,87 @@ private fun ModelPicker(
                     modifier = Modifier.padding(vertical = HelldyeDimens.Lg),
                 )
                 else -> LazyColumn(modifier = Modifier.weight(1f, fill = false)) {
-                    items(visible, key = { "${it.provider}/${it.id}" }) { model ->
-                        val active = model.provider == current?.provider && model.id == current.id
-                        Column(Modifier.fillMaxWidth()) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(min = 56.dp)
-                                    .drawBehind {
-                                        if (active) {
-                                            drawRect(
-                                                color = HelldyeColors.White,
-                                                size = Size(2.dp.toPx(), size.height),
-                                            )
-                                        }
-                                    }
-                                    .clickable { onSelect(model) }
-                                    .padding(start = 14.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Column(Modifier.weight(1f)) {
-                                    Text(
-                                        text = model.name,
-                                        style = MaterialTheme.typography.bodyLarge,
-                                        color = HelldyeColors.Text,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                    Text(
-                                        text = buildString {
-                                            append(model.provider)
-                                            if (model.contextWindow > 0) {
-                                                append("  ")
-                                                append(model.contextWindow / 1000)
-                                                append("K")
-                                            }
-                                            if (model.reasoning) append("  REASONING")
-                                        },
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = HelldyeColors.TextMuted,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                }
-                                if (active) {
-                                    Text(
-                                        text = "ACTIVE",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = HelldyeColors.TextSecondary,
-                                    )
-                                }
-                            }
-                            Hairline(color = HelldyeColors.LineSoft)
+                    grouped.forEach { (provider, providerModels) ->
+                        item(key = "provider-$provider") {
+                            Text(
+                                text = provider.uppercase(Locale.ROOT),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = HelldyeColors.TextMuted,
+                                modifier = Modifier.padding(
+                                    start = 14.dp,
+                                    top = HelldyeDimens.Lg,
+                                    bottom = HelldyeDimens.Xs,
+                                ),
+                            )
+                        }
+                        items(providerModels, key = { "${it.provider}/${it.id}" }) { model ->
+                            val active = model.provider == current?.provider && model.id == current.id
+                            ModelRow(model, active, onSelect)
                         }
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ModelRow(
+    model: GatewayModel,
+    active: Boolean,
+    onSelect: (GatewayModel) -> Unit,
+) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 56.dp)
+                .drawBehind {
+                    if (active) {
+                        drawRect(
+                            color = HelldyeColors.White,
+                            size = Size(2.dp.toPx(), size.height),
+                        )
+                    }
+                }
+                .clickable { onSelect(model) }
+                .padding(start = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = model.name,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = HelldyeColors.Text,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = buildString {
+                        if (model.contextWindow > 0) {
+                            append(model.contextWindow / 1000)
+                            append("K")
+                        }
+                        if (model.reasoning) {
+                            if (isNotEmpty()) append("  ")
+                            append("REASONING")
+                        }
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = HelldyeColors.TextMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (active) {
+                Text(
+                    text = "ACTIVE",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = HelldyeColors.TextSecondary,
+                )
+            }
+        }
+        Hairline(color = HelldyeColors.LineSoft)
     }
 }
 
@@ -2532,6 +2270,7 @@ private fun Composer(
     onSend: () -> Unit,
     onStop: () -> Unit,
     onVoice: () -> Unit,
+    listening: Boolean,
     streaming: Boolean,
     sendEnabled: Boolean,
     onToggleAttachments: () -> Unit,
@@ -2587,8 +2326,8 @@ private fun Composer(
         ) {
             Icon(
                 painter = painterResource(R.drawable.ic_mic),
-                contentDescription = "Voice input",
-                tint = HelldyeColors.TextSecondary,
+                contentDescription = if (listening) "Listening" else "Voice input",
+                tint = if (listening) HelldyeColors.Signal else HelldyeColors.TextSecondary,
                 modifier = Modifier.size(20.dp),
             )
         }
@@ -2703,7 +2442,6 @@ private fun displayName(context: Context, uri: Uri): String? {
 private fun AssistantScreenPreview() {
     HelldyeTheme {
         AssistantScreen(
-            overlay = true,
             screenshot = null,
             screenState = ScreenCaptureState.None,
             state = AssistantUiState(
@@ -2724,13 +2462,13 @@ private fun AssistantScreenPreview() {
             onAddAttachment = {},
             onRemoveAttachment = {},
             onRemoveScreenshot = {},
+            onUseScreenshot = {},
             onNotice = {},
             onDismissNotice = {},
             onOpenSettings = {},
             onOpenModelPicker = {},
             onCloseModelPicker = {},
             onSelectModel = {},
-            onSetAllowEdits = {},
             onOpenThinkingPicker = {},
             onCloseThinkingPicker = {},
             onSelectThinking = {},
@@ -2748,12 +2486,6 @@ private fun AssistantScreenPreview() {
             onRenameSession = { _, _ -> },
             onLoadOlder = {},
             onImportSessions = {},
-            onOpenDiff = {},
-            onCloseDiff = {},
-            onOpenTree = {},
-            onCloseTree = {},
-            onExport = {},
-            onExportConsumed = {},
             onReadAnswer = {},
             onExpand = {},
             onClose = {},
