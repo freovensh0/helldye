@@ -74,6 +74,8 @@ data class GatewayState(
     val allowEdits: Boolean = false,
     val lastEventId: String? = null,
     val epoch: String? = null,
+    /** Last cached usage; present for stopped sessions so the composer renders without Pi. */
+    val stats: GatewayStats? = null,
 )
 
 data class GatewayDiffFile(
@@ -361,11 +363,14 @@ class GatewayClient(private val config: GatewayConfig) {
             allowEdits = response.optBoolean("allowEdits", false),
             lastEventId = response.optString("lastEventId").takeIf { it.isNotBlank() },
             epoch = response.optString("epoch").takeIf { it.isNotBlank() },
+            stats = response.optJSONObject("stats")?.let(::parseStats),
         )
     }
 
-    fun stats(sessionId: String): GatewayStats {
-        val response = request("GET", "/sessions/$sessionId/stats")
+    fun stats(sessionId: String): GatewayStats =
+        parseStats(request("GET", "/sessions/$sessionId/stats"))
+
+    private fun parseStats(response: JSONObject): GatewayStats {
         val tokens = response.optJSONObject("tokens") ?: JSONObject()
         val context = response.optJSONObject("contextUsage") ?: JSONObject()
         return GatewayStats(

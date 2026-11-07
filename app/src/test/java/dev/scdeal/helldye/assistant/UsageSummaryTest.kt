@@ -21,7 +21,7 @@ class UsageSummaryTest {
     @Test
     fun `usage line matches the Pi footer`() {
         assertEquals(
-            "CLAUDE SONNET  ·  THINK HIGH  ·  63.0K TOK  ·  \$0.0423  ·  CACHE 75%  ·  CTX 30%",
+            "CLAUDE SONNET  ·  THINK HIGH  ·  CTX 30% 60.0K/200K  ·  63.0K TOK  ·  \$0.0423  ·  CACHE 75%",
             UsageSummary.text("Claude Sonnet", "high", stats),
         )
     }
@@ -33,6 +33,26 @@ class UsageSummaryTest {
             UsageSummary.text("Sonnet", "off", GatewayStats()),
         )
         assertEquals("", UsageSummary.text(null, null, null))
+    }
+
+    @Test
+    fun `cached context is shown while the session is stopped`() {
+        assertEquals(
+            "SONNET  ·  CTX 43% 86.0K/200K",
+            UsageSummary.text(
+                "Sonnet",
+                null,
+                GatewayStats(
+                    contextTokens = 86_000,
+                    contextWindow = 200_000,
+                    contextPercent = 43,
+                ),
+            ),
+        )
+        assertEquals(
+            "CTX ? 0/1M",
+            UsageSummary.text(null, null, GatewayStats(contextWindow = 1_000_000)),
+        )
     }
 
     @Test
@@ -71,6 +91,8 @@ class UsageSummaryTest {
         assertEquals("999", UsageSummary.compactTokens(999))
         assertEquals("1.5K", UsageSummary.compactTokens(1_500))
         assertEquals("2.0M", UsageSummary.compactTokens(2_000_000))
+        assertEquals("200K", UsageSummary.compactWindow(200_000))
+        assertEquals("1M", UsageSummary.compactWindow(1_000_000))
         assertEquals("\$0.0423", UsageSummary.formatCost(0.0423))
         assertEquals("\$1.50", UsageSummary.formatCost(1.5))
     }
