@@ -188,6 +188,8 @@ and without SSE subscribers. The session record is kept; the next prompt starts 
 - `eventId` is the per-session event id at the moment Pi answered. Open the event stream with
   `Last-Event-ID: 42` to receive events after the transcript snapshot.
 - `started:false` means Pi is stopped; the gateway never spawns it for this route.
+- The page is shaped for the phone: `toolResult` text is clipped to 16,000 characters and base64
+  image data is omitted. Pi keeps the full transcript on the host; `/export` still returns all of it.
 
 ### 2.5.1 Host import
 

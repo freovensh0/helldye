@@ -39,6 +39,7 @@ const EVENT_BUFFER: usize = 4_096;
 const BROADCAST_CAPACITY: usize = 2_048;
 const DEFAULT_PAGE: usize = 500;
 const MAX_PAGE: usize = 500;
+const TRANSCRIPT_TEXT_LIMIT: usize = 16_000;
 const MAX_IMAGES: usize = 4;
 const MAX_IMAGE_EDGE: u32 = 1_568;
 const MAX_IMAGE_BYTES: usize = 1_500_000;
@@ -1932,6 +1933,7 @@ async fn session_messages(
         }
         let limit = page.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
         let (total, has_more) = paginate_messages(&mut data, limit, page.before);
+        clamp_transcript(&mut data);
         let source = if data["messages"].as_array().is_some_and(|m| !m.is_empty()) {
             "host"
         } else {
@@ -1954,6 +1956,7 @@ async fn session_messages(
     let mut data = command_data(response)?;
     let limit = page.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
     let (total, has_more) = paginate_messages(&mut data, limit, page.before);
+    clamp_transcript(&mut data);
     if let Some(object) = data.as_object_mut() {
         object.insert("started".to_string(), json!(true));
         object.insert("total".to_string(), json!(total));
@@ -1976,6 +1979,58 @@ fn paginate_messages(data: &mut Value, limit: usize, before: Option<usize>) -> (
     let page: Vec<Value> = messages[start..end].to_vec();
     *messages = page;
     (total, start > 0)
+}
+
+/// A page feeds the phone's text-only transcript. Bound the parts the app discards anyway, so a long
+/// session does not ship megabytes of tool output and base64 images over the network. The host
+/// transcript keeps the full data.
+fn clamp_transcript(data: &mut Value) {
+    let Some(messages) = data.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for message in messages {
+        let Some(object) = message.as_object_mut() else {
+            continue;
+        };
+        let tool_result = object.get("role").and_then(Value::as_str) == Some("toolResult");
+        let Some(content) = object.get_mut("content") else {
+            continue;
+        };
+        match content {
+            Value::String(text) if tool_result => clamp_text(text),
+            Value::Array(blocks) => {
+                for block in blocks {
+                    let Some(block) = block.as_object_mut() else {
+                        continue;
+                    };
+                    match block.get("type").and_then(Value::as_str) {
+                        Some("image") => {
+                            block.remove("data");
+                            if let Some(source) =
+                                block.get_mut("source").and_then(Value::as_object_mut)
+                            {
+                                source.remove("data");
+                            }
+                        }
+                        Some("text") if tool_result => {
+                            if let Some(Value::String(text)) = block.get_mut("text") {
+                                clamp_text(text);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn clamp_text(text: &mut String) {
+    if text.chars().count() <= TRANSCRIPT_TEXT_LIMIT {
+        return;
+    }
+    *text = text.chars().take(TRANSCRIPT_TEXT_LIMIT).collect::<String>() + "\n…";
 }
 
 async fn lookup_owned(state: &AppState, id: &str) -> Result<Arc<Session>, (StatusCode, String)> {
@@ -2645,12 +2700,12 @@ mod tests {
     #[cfg(unix)]
     use super::acquire_writer_lock;
     use super::{
-        CachedModel, ContextFile, ImageBody, PromptContext, constant_time_eq, decode_base64,
-        ensure_token_file_outside_workspaces, git_diff_limited, info_payload, jpeg_dimensions,
-        migrated_name, neutral_name, paginate_messages, parse_host_messages, parse_numstat,
-        parse_session_metadata, parse_worktrees, pi_command, png_dimensions, read_token_file,
-        redact_stderr_line, resolve_workspace, resync_event, scan_import_dir, should_reap,
-        valid_branch, validate_images, write_state_atomically,
+        CachedModel, ContextFile, ImageBody, PromptContext, clamp_transcript, constant_time_eq,
+        decode_base64, ensure_token_file_outside_workspaces, git_diff_limited, info_payload,
+        jpeg_dimensions, migrated_name, neutral_name, paginate_messages, parse_host_messages,
+        parse_numstat, parse_session_metadata, parse_worktrees, pi_command, png_dimensions,
+        read_token_file, redact_stderr_line, resolve_workspace, resync_event, scan_import_dir,
+        should_reap, valid_branch, validate_images, write_state_atomically,
     };
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
@@ -3480,6 +3535,39 @@ mod tests {
         let mut small = serde_json::json!({ "messages": [1, 2] });
         assert_eq!(paginate_messages(&mut small, 10, None), (2, false));
         assert_eq!(small["messages"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn transcript_page_clips_tool_output_and_drops_image_bytes() {
+        let huge = "x".repeat(20_000);
+        let mut data = serde_json::json!({
+            "messages": [
+                { "role": "toolResult", "content": [{ "type": "text", "text": huge }] },
+                { "role": "toolResult", "content": "y".repeat(20_000) },
+                { "role": "user", "content": [{
+                    "type": "image",
+                    "data": "AAAA",
+                    "mimeType": "image/jpeg"
+                }] },
+                { "role": "assistant", "content": [{ "type": "text", "text": "keep this" }] }
+            ]
+        });
+        clamp_transcript(&mut data);
+        let messages = data["messages"].as_array().unwrap();
+        assert_eq!(
+            messages[0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            super::TRANSCRIPT_TEXT_LIMIT + 2
+        );
+        assert_eq!(
+            messages[1]["content"].as_str().unwrap().chars().count(),
+            super::TRANSCRIPT_TEXT_LIMIT + 2
+        );
+        assert!(messages[2]["content"][0].get("data").is_none());
+        assert_eq!(messages[3]["content"][0]["text"], "keep this");
     }
 
     #[test]
