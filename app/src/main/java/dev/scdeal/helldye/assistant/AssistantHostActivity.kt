@@ -119,7 +119,6 @@ abstract class AssistantHostActivity : ComponentActivity() {
         }
 
         AssistantScreen(
-            overlay = overlay,
             screenshot = if (overlay) screenshot else null,
             screenState = if (overlay) screenState else ScreenCaptureState.None,
             state = state,
@@ -128,6 +127,7 @@ abstract class AssistantHostActivity : ComponentActivity() {
             onAddAttachment = viewModel::addAttachment,
             onRemoveAttachment = viewModel::removeAttachment,
             onRemoveScreenshot = viewModel::removeScreenshot,
+            onUseScreenshot = { ScreenshotStager.use() },
             onNotice = viewModel::notice,
             onDismissNotice = viewModel::dismissNotice,
             onOpenSettings = {
@@ -136,7 +136,6 @@ abstract class AssistantHostActivity : ComponentActivity() {
             onOpenModelPicker = viewModel::openModelPicker,
             onCloseModelPicker = viewModel::closeModelPicker,
             onSelectModel = viewModel::selectModel,
-            onSetAllowEdits = viewModel::setAllowEdits,
             onOpenThinkingPicker = viewModel::openThinkingPicker,
             onCloseThinkingPicker = viewModel::closeThinkingPicker,
             onSelectThinking = viewModel::selectThinking,
@@ -154,12 +153,6 @@ abstract class AssistantHostActivity : ComponentActivity() {
             onRenameSession = viewModel::renameSession,
             onLoadOlder = viewModel::loadOlder,
             onImportSessions = viewModel::importSessions,
-            onOpenDiff = viewModel::openDiff,
-            onCloseDiff = viewModel::closeDiff,
-            onOpenTree = viewModel::openTree,
-            onCloseTree = viewModel::closeTree,
-            onExport = viewModel::exportHtml,
-            onExportConsumed = viewModel::consumeExport,
             onReadAnswer = viewModel::readLastAnswer,
             onExpand = expandAction,
             onClose = { finish() },

@@ -5,7 +5,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-enum class ScreenCaptureState { None, Ready, Blocked, Off, Sent }
+enum class ScreenCaptureState { None, Available, Ready, Blocked, Off, Sent }
 
 /**
  * Process-local, memory-only staging for the one assist screenshot.
@@ -22,7 +22,15 @@ object ScreenshotStager {
 
     fun stage(shot: Bitmap) {
         _bitmap.value = shot
-        _state.value = ScreenCaptureState.Ready
+        // Capture is not consent to attach: the composer offers the shot until the operator uses it.
+        _state.value = ScreenCaptureState.Available
+    }
+
+    /** Explicitly attach the available screenshot to the next prompt. */
+    fun use() {
+        if (_state.value == ScreenCaptureState.Available) {
+            _state.value = ScreenCaptureState.Ready
+        }
     }
 
     fun blocked() {

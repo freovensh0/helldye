@@ -13,6 +13,20 @@ Scope: the assistant overlay, default-assistant onboarding, settings, and the st
 
 ![HELLDYE assistant screen](mockups/assistant-screen.png)
 
+### Revision 2026-11-07 — personal-assistant surface
+
+- The top bar is the session title, state, and overflow. The wordmark and the close button are gone;
+  back closes the surface.
+- A session rail sits under the top bar when more than one session exists. Tapping a rail tab switches
+  immediately; `+ NEW` starts a session.
+- DIFF, SESSION TREE, EXPORT HTML, and FILE EDITS are not part of the personal-assistant surface.
+  The gateway endpoints stay, but the app does not call them.
+- Provider failures render as an error block in the conversation. Notices wrap and scroll instead of
+  clipping to one line.
+- A screen capture is offered as `AVAILABLE`; it is attached only after the operator taps `USE`.
+- Transitions are 120–160 ms fades/scales, and list items animate placement. The mockup board still
+  shows the earlier top bar; this section supersedes it until the board is regenerated.
+
 The mockup is an HTML/CSS visual target, not app code. It uses the exact token values in section 4.
 The board and PNGs show the Phase 2 overlay: the empty assistant, the screenshot strip, and the flat
 settings list. They are regenerated with the design refresh; there is no older version in the repo.

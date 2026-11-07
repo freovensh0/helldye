@@ -13,21 +13,25 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.platform.LocalContext
+import java.util.Locale
 
 class SpeechInput(
     private val context: Context,
     private val onResult: (String) -> Unit,
+    private val onListening: (Boolean) -> Unit,
     private val fail: (String) -> Unit,
 ) {
     private var recognizer: SpeechRecognizer? = null
 
     private val listener = object : RecognitionListener {
         override fun onResults(results: Bundle?) {
+            onListening(false)
             val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
             if (text.isNullOrBlank()) fail("No speech detected.") else onResult(text)
         }
 
         override fun onError(error: Int) {
+            onListening(false)
             fail(
                 when (error) {
                     SpeechRecognizer.ERROR_NO_MATCH,
@@ -40,7 +44,7 @@ class SpeechInput(
             )
         }
 
-        override fun onReadyForSpeech(params: Bundle?) = Unit
+        override fun onReadyForSpeech(params: Bundle?) = onListening(true)
 
         override fun onBeginningOfSpeech() = Unit
 
@@ -48,7 +52,7 @@ class SpeechInput(
 
         override fun onBufferReceived(buffer: ByteArray?) = Unit
 
-        override fun onEndOfSpeech() = Unit
+        override fun onEndOfSpeech() = onListening(false)
 
         override fun onPartialResults(partialResults: Bundle?) = Unit
 
@@ -66,10 +70,14 @@ class SpeechInput(
         }
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
         }
         runCatching { engine.startListening(intent) }
-            .onFailure { fail("Speech recognition is unavailable.") }
+            .onFailure {
+                onListening(false)
+                fail("Speech recognition is unavailable.")
+            }
     }
 
     fun destroy() {
@@ -77,26 +85,31 @@ class SpeechInput(
         recognizer = null
     }
 
-    private fun create(): SpeechRecognizer? = runCatching {
+    private fun create(): SpeechRecognizer? {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
         ) {
-            SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
-        } else {
-            SpeechRecognizer.createSpeechRecognizer(context)
+            runCatching { SpeechRecognizer.createOnDeviceSpeechRecognizer(context) }
+                .getOrNull()
+                ?.let { return it }
         }
-    }.getOrNull()
+        return runCatching { SpeechRecognizer.createSpeechRecognizer(context) }.getOrNull()
+    }
 }
 
 @Composable
 fun rememberSpeechInput(
     onResult: (String) -> Unit,
+    onListening: (Boolean) -> Unit,
     onError: (String) -> Unit,
 ): SpeechInput {
     val context = LocalContext.current.applicationContext
     val result by rememberUpdatedState(onResult)
+    val listening by rememberUpdatedState(onListening)
     val error by rememberUpdatedState(onError)
-    val speech = remember(context) { SpeechInput(context, { result(it) }, { error(it) }) }
+    val speech = remember(context) {
+        SpeechInput(context, { result(it) }, { listening(it) }, { error(it) })
+    }
     DisposableEffect(speech) { onDispose { speech.destroy() } }
     return speech
 }

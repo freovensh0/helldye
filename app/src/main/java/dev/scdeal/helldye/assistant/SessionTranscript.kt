@@ -40,6 +40,15 @@ object SessionTranscript {
                             thinking,
                         )
                     }
+                    if (message.optString("stopReason") == "error") {
+                        restored += ChatMessage(
+                            UUID.randomUUID().toString(),
+                            ChatRole.Error,
+                            message.optString("errorMessage").ifBlank {
+                                "The provider returned an error."
+                            },
+                        )
+                    }
                     val content = message.optJSONArray("content") ?: continue
                     for (blockIndex in 0 until content.length()) {
                         val block = content.optJSONObject(blockIndex) ?: continue

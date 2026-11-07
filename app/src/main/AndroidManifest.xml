@@ -61,7 +61,7 @@
             android:excludeFromRecents="true"
             android:exported="false"
             android:launchMode="singleTop"
-            android:theme="@style/Theme.Helldye"
+            android:theme="@style/Theme.Helldye.Assistant.Full"
             android:windowSoftInputMode="adjustResize" />
 
         <activity
