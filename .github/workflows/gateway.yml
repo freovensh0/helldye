@@ -81,4 +81,4 @@ jobs:
               run: |
                   gh release create latest --prerelease --title "Latest main build" \
                       --notes "Rolling build from main; assets update on every push." || true
-                  gh release upload latest "gateway/target/aarch64-linux-android/release/helldye-gateway#helldye-gateway" --clobber
+                  gh release upload latest "gateway/target/aarch64-linux-android/release/helldye-gateway" --clobber
