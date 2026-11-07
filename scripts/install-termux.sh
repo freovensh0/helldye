@@ -11,6 +11,7 @@ TOKEN_FILE="$HOME/.config/helldye/token"
 APK_DIR="/sdcard/Download/Termux"
 LISTEN="${HELLDYE_LISTEN:-127.0.0.1:8787}"
 API="https://api.github.com/repos/$REPO"
+RELEASE_URL="https://github.com/$REPO/releases/download/latest"
 
 die() {
     echo "error: $*" >&2
@@ -27,7 +28,8 @@ case "${PREFIX:-}" in
 esac
 
 AUTH="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
-[ -n "$AUTH" ] || die "GITHUB_TOKEN is required (the repository is private)"
+# The repository is public: releases download without a token. A token only raises the
+# unauthenticated API limit and is required for artifact downloads from a non-main branch.
 
 missing=()
 for cmd in curl unzip jq; do
@@ -41,7 +43,11 @@ fi
 PI="${PI_BOLT:-$(command -v pi-bolt || true)}"
 [ -n "$PI" ] || die "pi-bolt not found; install Pi-Bolt or set PI_BOLT=/path/to/pi-bolt"
 api() {
-    curl -fsSL -H "Authorization: Bearer $AUTH" -H "Accept: application/vnd.github+json" "$@"
+    if [ -n "$AUTH" ]; then
+        curl -fsSL -H "Authorization: Bearer $AUTH" -H "Accept: application/vnd.github+json" "$@"
+    else
+        curl -fsSL -H "Accept: application/vnd.github+json" "$@"
+    fi
 }
 
 latest_run() {
@@ -65,29 +71,50 @@ fetch() { # <run id> <artifact name> <zip> <dir>
     url=$(artifact_url "$1" "$2")
     [ -n "$url" ] || die "artifact $2 not found in run $1"
     info "downloading $2"
-    curl -fsSL -H "Authorization: Bearer $AUTH" -L "$url" -o "$3" ||
-        die "download failed for $2"
+    if [ -n "$AUTH" ]; then
+        curl -fsSL -H "Authorization: Bearer $AUTH" -L "$url" -o "$3" ||
+            die "download failed for $2"
+    else
+        curl -fsSL -L "$url" -o "$3" || die "download failed for $2"
+    fi
     unzip -q -o "$3" -d "$4"
 }
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-gateway_run=$(latest_run gateway.yml)
-[ -n "$gateway_run" ] || die "no successful gateway build on $BRANCH"
-info "gateway build: $(run_info "$gateway_run")"
-fetch "$gateway_run" "$GATEWAY_ARTIFACT" "$tmp/gateway.zip" "$tmp/gateway"
-gateway_bin=$(find "$tmp/gateway" -type f -name helldye-gateway | head -n 1)
-[ -n "$gateway_bin" ] || die "gateway binary missing from the artifact"
+if [ "$BRANCH" = "main" ]; then
+    # Public release assets; no token and no API rate limit.
+    mkdir -p "$tmp/gateway"
+    info "downloading the latest gateway release"
+    curl -fsSL "$RELEASE_URL/helldye-gateway" -o "$tmp/gateway/helldye-gateway" ||
+        die "no latest gateway release; wait for the main build or pass a branch"
+    gateway_bin="$tmp/gateway/helldye-gateway"
+
+    mkdir -p "$tmp/apk"
+    info "downloading the latest APK release"
+    curl -fsSL "$RELEASE_URL/HELLDYE.apk" -o "$tmp/apk/HELLDYE.apk" ||
+        die "no latest APK release; wait for the main build or pass a branch"
+    apk_file="$tmp/apk/HELLDYE.apk"
+else
+    [ -n "$AUTH" ] || die "GITHUB_TOKEN is required to download artifacts from $BRANCH"
+    gateway_run=$(latest_run gateway.yml)
+    [ -n "$gateway_run" ] || die "no successful gateway build on $BRANCH"
+    info "gateway build: $(run_info "$gateway_run")"
+    fetch "$gateway_run" "$GATEWAY_ARTIFACT" "$tmp/gateway.zip" "$tmp/gateway"
+    gateway_bin=$(find "$tmp/gateway" -type f -name helldye-gateway | head -n 1)
+    [ -n "$gateway_bin" ] || die "gateway binary missing from the artifact"
+
+    apk_run=$(latest_run ci.yml)
+    [ -n "$apk_run" ] || die "no successful Android build on $BRANCH"
+    info "apk build:     $(run_info "$apk_run")"
+    fetch "$apk_run" "$APK_ARTIFACT" "$tmp/apk.zip" "$tmp/apk"
+    apk_file=$(find "$tmp/apk" -type f -name '*.apk' | head -n 1)
+    [ -n "$apk_file" ] || die "APK missing from the artifact"
+fi
+
 mkdir -p "$GATEWAY_DIR"
 install -m 755 "$gateway_bin" "$GATEWAY_DIR/helldye-gateway"
-
-apk_run=$(latest_run ci.yml)
-[ -n "$apk_run" ] || die "no successful Android build on $BRANCH"
-info "apk build:     $(run_info "$apk_run")"
-fetch "$apk_run" "$APK_ARTIFACT" "$tmp/apk.zip" "$tmp/apk"
-apk_file=$(find "$tmp/apk" -type f -name '*.apk' | head -n 1)
-[ -n "$apk_file" ] || die "APK missing from the artifact"
 
 if [ ! -d /sdcard/Download ]; then
     info "requesting storage access"
@@ -112,10 +139,22 @@ else
 fi
 chmod 600 "$TOKEN_FILE"
 
-curl -fsSL -H "Authorization: Bearer $AUTH" -H "Accept: application/vnd.github.raw" \
-    "$API/contents/scripts/hellgate.sh?ref=$BRANCH" >"$PREFIX/bin/hellgate" ||
-    die "could not install hellgate"
-chmod 755 "$PREFIX/bin/hellgate"
+tmp_hellgate="$PREFIX/bin/hellgate.new"
+if [ "$BRANCH" = "main" ]; then
+    curl -fsSL "$RELEASE_URL/hellgate.sh" -o "$tmp_hellgate" ||
+        die "could not download hellgate from the latest release"
+elif [ -n "$AUTH" ]; then
+    curl -fsSL -H "Authorization: Bearer $AUTH" -H "Accept: application/vnd.github.raw" \
+        "$API/contents/scripts/hellgate.sh?ref=$BRANCH" >"$tmp_hellgate" ||
+        die "could not install hellgate"
+else
+    curl -fsSL -H "Accept: application/vnd.github.raw" \
+        "$API/contents/scripts/hellgate.sh?ref=$BRANCH" >"$tmp_hellgate" ||
+        die "could not install hellgate"
+fi
+chmod 755 "$tmp_hellgate"
+# Replace atomically: `hellgate update` may be running this file right now.
+mv "$tmp_hellgate" "$PREFIX/bin/hellgate"
 rm -f "$GATEWAY_DIR/start.sh"
 
 info "restarting the gateway on $LISTEN"

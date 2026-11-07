@@ -27,6 +27,8 @@ Usage: hellgate <command>
   restart   restart the gateway
   status    show whether it is running and accepts the token
   token     print the bearer token
+  update    download the latest main build and restart
+  update <branch>     update from another branch (needs GITHUB_TOKEN)
   tools     show the Pi tool allowlist
   tools all           enable all tools, including extension tools
   tools read-only     read, grep, find, ls
@@ -149,6 +151,14 @@ show_token() {
     echo
 }
 
+update() {
+    local branch="${1:-main}"
+    local repo="${HELLDYE_REPO:-freovensh0/helldye}"
+    echo "==> updating HELLDYE from $repo@$branch"
+    curl -fsSL "https://raw.githubusercontent.com/$repo/$branch/scripts/install-termux.sh" |
+        HELLDYE_REPO="$repo" HELLDYE_BRANCH="$branch" bash -
+}
+
 current_tools() {
     if [ -s "$TOOLS_FILE" ]; then
         cat "$TOOLS_FILE"
@@ -264,6 +274,7 @@ restart)
     ;;
 status) status ;;
 token) show_token ;;
+update) update "${2:-main}" ;;
 tools) set_tools "${2:-}" ;;
 help | -h | --help) usage ;;
 *)

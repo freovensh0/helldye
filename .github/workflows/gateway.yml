@@ -41,6 +41,8 @@ jobs:
         name: Termux arm64 binary
         runs-on: ubuntu-latest
         timeout-minutes: 20
+        permissions:
+            contents: write
         steps:
             - uses: actions/checkout@v7
 
@@ -71,3 +73,12 @@ jobs:
                   name: helldye-gateway-termux-arm64
                   path: gateway/target/aarch64-linux-android/release/helldye-gateway
                   if-no-files-found: error
+
+            - name: Publish latest gateway
+              if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  gh release create latest --prerelease --title "Latest main build" \
+                      --notes "Rolling build from main; assets update on every push." || true
+                  gh release upload latest "gateway/target/aarch64-linux-android/release/helldye-gateway#helldye-gateway" --clobber

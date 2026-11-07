@@ -50,13 +50,14 @@ file yourself; the phone has no purge action and never claims a session was dele
 
 ## Install (Termux)
 
-The repository is private, so the installer needs a GitHub token with **Contents: read** and
-**Actions: read**. In Termux:
+The repository is public. In Termux:
 
 ```bash
-export GITHUB_TOKEN=<github-token>
-bash -c 'curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github.raw" "https://api.github.com/repos/freovensh0/helldye/contents/scripts/install-termux.sh?ref=main" | bash'
+curl -fsSL https://raw.githubusercontent.com/freovensh0/helldye/main/scripts/install-termux.sh | bash
 ```
+
+A `GITHUB_TOKEN` is optional and only raises the unauthenticated API limit. A token with
+**Contents: read** and **Actions: read** is required to install from a non-`main` branch.
 
 The script installs the latest successful `main` builds:
 
@@ -71,7 +72,8 @@ never passed as a command-line argument.
 
 It prints the gateway URL, token, and the installed build SHA. Enter the URL and token in HELLDYE
 settings, tap the APK to install, and manage the gateway with `hellgate start`, `stop`, `restart`, or
-`status`. If the app reports `HTTP 401`, run `hellgate token` and paste that exact value.
+`status`. After the first install, `hellgate update` fetches the latest `main` gateway and APK and
+restarts the gateway. If the app reports `HTTP 401`, run `hellgate token` and paste that exact value.
 
 If Android says “app not installed”, uninstall the previous HELLDYE once: CI keeps a stable debug key,
 so later builds update over it. File managers may show the APK's uncompressed size; the file is
