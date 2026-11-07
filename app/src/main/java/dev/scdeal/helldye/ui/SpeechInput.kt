@@ -103,7 +103,7 @@ fun rememberSpeechInput(
     onListening: (Boolean) -> Unit,
     onError: (String) -> Unit,
 ): SpeechInput {
-    val context = LocalContext.current.applicationContext
+    val context = LocalContext.current
     val result by rememberUpdatedState(onResult)
     val listening by rememberUpdatedState(onListening)
     val error by rememberUpdatedState(onError)

@@ -43,6 +43,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -93,6 +94,7 @@ import dev.scdeal.helldye.assistant.AssistantUiState
 import dev.scdeal.helldye.assistant.Attachment
 import dev.scdeal.helldye.assistant.ChatMessage
 import dev.scdeal.helldye.assistant.ChatRole
+import dev.scdeal.helldye.assistant.OpenSession
 import dev.scdeal.helldye.assistant.Conversation
 import dev.scdeal.helldye.assistant.ConversationItem
 import dev.scdeal.helldye.assistant.ExtensionDialog
@@ -154,11 +156,11 @@ fun AssistantScreen(
     onOpenSessions: () -> Unit,
     onCloseSessions: () -> Unit,
     onSwitchSession: (String) -> Unit,
+    onCloseTab: (String) -> Unit,
     onDeleteSession: (String) -> Unit,
     onRenameSession: (String, String) -> Unit,
     onLoadOlder: () -> Unit,
     onImportSessions: () -> Unit,
-    onReadAnswer: () -> Unit,
     onExpand: (() -> Unit)?,
     onClose: () -> Unit,
 ) {
@@ -376,17 +378,17 @@ fun AssistantScreen(
                 )
                 Hairline(color = HelldyeColors.LineSoft)
 
-                Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                    if (state.sessions.size > 1) {
-                        SessionRail(
-                            sessions = state.sessions,
-                            currentId = state.sessionId,
-                            onSwitch = onSwitchSession,
-                            onNew = onNewSession,
-                        )
-                    }
-                    Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                        LazyColumn(
+                SessionTabs(
+                    tabs = state.openSessions,
+                    currentId = state.sessionId
+                        ?: state.openSessions.lastOrNull { it.draft }?.id,
+                    onSwitch = onSwitchSession,
+                    onClose = onCloseTab,
+                    onNew = onNewSession,
+                )
+                Hairline(color = HelldyeColors.LineSoft)
+                Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(
@@ -451,7 +453,6 @@ fun AssistantScreen(
                                 color = HelldyeColors.TextSecondary,
                             )
                         }
-                    }
                     }
                 }
 
@@ -525,7 +526,6 @@ fun AssistantScreen(
             OverflowMenu(
                 onOpenSessions = onOpenSessions,
                 onOpenSettings = onOpenSettings,
-                onReadAnswer = onReadAnswer,
                 onExpand = onExpand,
                 onDismiss = { overflowOpen = false },
             )
@@ -627,7 +627,6 @@ private fun TopRail(
             color = stateColor,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f, fill = false),
         )
         IconButton(
             onClick = onOpenOverflow,
@@ -647,7 +646,6 @@ private fun TopRail(
 private fun OverflowMenu(
     onOpenSessions: () -> Unit,
     onOpenSettings: () -> Unit,
-    onReadAnswer: () -> Unit,
     onExpand: (() -> Unit)?,
     onDismiss: () -> Unit,
 ) {
@@ -675,12 +673,7 @@ private fun OverflowMenu(
                 onOpenSettings()
             }
             Hairline(color = HelldyeColors.LineSoft)
-            OverflowRow("READ ANSWER") {
-                onDismiss()
-                onReadAnswer()
-            }
             if (onExpand != null) {
-                Hairline(color = HelldyeColors.LineSoft)
                 OverflowRow("FULL SCREEN") {
                     onDismiss()
                     onExpand()
@@ -1391,64 +1384,90 @@ private fun SlashPalette(
 }
 
 @Composable
-private fun SessionRail(
-    sessions: List<GatewaySession>,
+private fun SessionTabs(
+    tabs: List<OpenSession>,
     currentId: String?,
     onSwitch: (String) -> Unit,
+    onClose: (String) -> Unit,
     onNew: () -> Unit,
 ) {
-    LazyColumn(
+    Row(
         modifier = Modifier
-            .width(96.dp)
-            .fillMaxHeight()
-            .drawBehind {
-                drawRect(
-                    color = HelldyeColors.LineSoft,
-                    topLeft = Offset(size.width - 1.dp.toPx(), 0f),
-                    size = Size(1.dp.toPx(), size.height),
-                )
-            },
+            .fillMaxWidth()
+            .heightIn(min = HelldyeDimens.TouchTarget),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        item(key = "rail-new") {
-            SessionTab(label = "+ NEW", active = false, onClick = onNew)
+        LazyRow(
+            modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(horizontal = HelldyeDimens.ScreenPadding),
+            horizontalArrangement = Arrangement.spacedBy(HelldyeDimens.Xs),
+        ) {
+            items(tabs, key = { it.id }) { tab ->
+                val active = tab.id == currentId
+                SessionTab(
+                    label = if (tab.draft) "NEW SESSION" else tab.name,
+                    active = active,
+                    onSelect = { if (!active) onSwitch(tab.id) },
+                    onClose = { onClose(tab.id) },
+                )
+            }
         }
-        items(sessions, key = { it.id }) { session ->
-            SessionTab(
-                label = SessionTitle.display(session.name, session.created),
-                active = session.id == currentId,
-                onClick = { onSwitch(session.id) },
+        IconButton(
+            onClick = onNew,
+            modifier = Modifier.size(HelldyeDimens.TouchTarget),
+        ) {
+            Icon(
+                painter = painterResource(R.drawable.ic_add),
+                contentDescription = "New session",
+                tint = HelldyeColors.TextSecondary,
+                modifier = Modifier.size(18.dp),
             )
         }
     }
 }
 
 @Composable
-private fun SessionTab(label: String, active: Boolean, onClick: () -> Unit) {
-    Box(
+private fun SessionTab(
+    label: String,
+    active: Boolean,
+    onSelect: () -> Unit,
+    onClose: () -> Unit,
+) {
+    Row(
         modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(min = 64.dp)
+            .heightIn(min = HelldyeDimens.TouchTarget)
+            .clickable(role = Role.Button, onClick = onSelect)
             .drawBehind {
                 if (active) {
-                    drawRect(HelldyeColors.White, size = Size(2.dp.toPx(), size.height))
+                    drawRect(
+                        color = HelldyeColors.White,
+                        topLeft = Offset(0f, size.height - 2.dp.toPx()),
+                        size = Size(size.width, 2.dp.toPx()),
+                    )
                 }
-                drawRect(
-                    HelldyeColors.LineSoft,
-                    topLeft = Offset(0f, size.height - 1.dp.toPx()),
-                    size = Size(size.width, 1.dp.toPx()),
-                )
             }
-            .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = HelldyeDimens.Sm, vertical = HelldyeDimens.Sm),
-        contentAlignment = Alignment.CenterStart,
+            .padding(start = HelldyeDimens.Md),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelSmall,
+            style = MaterialTheme.typography.labelMedium,
             color = if (active) HelldyeColors.Text else HelldyeColors.TextSecondary,
-            maxLines = 3,
+            maxLines = 1,
             overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = 160.dp),
         )
+        IconButton(
+            onClick = onClose,
+            modifier = Modifier.size(HelldyeDimens.TouchTarget),
+        ) {
+            Icon(
+                painter = painterResource(R.drawable.ic_close),
+                contentDescription = "Close tab",
+                tint = HelldyeColors.TextMuted,
+                modifier = Modifier.size(12.dp),
+            )
+        }
     }
 }
 
@@ -2482,11 +2501,11 @@ private fun AssistantScreenPreview() {
             onOpenSessions = {},
             onCloseSessions = {},
             onSwitchSession = {},
+            onCloseTab = {},
             onDeleteSession = {},
             onRenameSession = { _, _ -> },
             onLoadOlder = {},
             onImportSessions = {},
-            onReadAnswer = {},
             onExpand = {},
             onClose = {},
         )

@@ -722,38 +722,27 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         capabilitiesJob?.cancel()
         capabilitiesJob = null
         capabilitiesSessionId = null
-        GatewaySessionStore.reset()
-        GatewaySessionStore.fingerprint = config.fingerprint
-        client = null
+        // A draft has no gateway record. The first prompt creates the session, so tapping + NEW
+        // never leaves an empty session behind.
+        GatewaySessionStore.sessionId = null
+        GatewaySessionStore.lastEventId = null
+        GatewaySessionStore.epoch = null
         toolMessages.clear()
         pendingUserEchoes.clear()
         AssistantDraftStore.clear()
-        // Clear synchronously so the tap responds before the gateway round trip. Model and command
-        // lists are host-wide, so keep them until the picker refreshes them.
         val previous = _state.value
         _state.value = AssistantUiState(
+            openSessions = previous.openSessions.filterNot { it.draft } + OpenSession(
+                id = DRAFT_ID,
+                name = "NEW SESSION",
+                draft = true,
+            ),
             models = previous.models,
             commands = previous.commands,
             thinkingLevels = previous.thinkingLevels,
             sessions = previous.sessions,
+            editorPrefill = "",
         )
-
-        viewModelScope.launch(Dispatchers.IO) {
-            runCatching {
-                val gateway = ensureClient(config)
-                val session = ensureSession(gateway, config)
-                _state.update {
-                    it.copy(sessionName = SessionTitle.display(session.name, session.created))
-                }
-                startStream(gateway, session.id)
-                refreshCapabilities(gateway, session.id, announce = false)
-                refreshSessions()
-            }.onFailure { error ->
-                _state.update {
-                    it.copy(error = error.message ?: "Could not start a new session.")
-                }
-            }
-        }
     }
 
     fun openSessions() {
@@ -786,6 +775,10 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun switchSession(sessionId: String) {
         stopSpeaking()
+        if (sessionId == DRAFT_ID) {
+            newSession()
+            return
+        }
         if (GatewaySessionStore.sessionId == sessionId) {
             closeSessions()
             return
@@ -793,6 +786,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         val config = settings.load()
         if (config.url.isBlank()) return
 
+        _state.update { it.copy(sessionsOpen = false) }
         clearScreenQuery()
         streamJob?.cancel()
         streamJob = null
@@ -809,15 +803,19 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         toolMessages.clear()
         pendingUserEchoes.clear()
         AssistantDraftStore.clear()
+        val known = _state.value.sessions.firstOrNull { it.id == sessionId }
+        val name = SessionTitle.display(known?.name, known?.created ?: 0)
         _state.value = AssistantUiState(
             sessionId = sessionId,
-            sessionName = _state.value.sessions
-                .firstOrNull { it.id == sessionId }
-                ?.let { SessionTitle.display(it.name, it.created) },
+            sessionName = name,
+            openSessions = (_state.value.openSessions.filterNot {
+                it.draft || it.id == sessionId
+            } + OpenSession(sessionId, name, known?.created ?: 0)).distinctBy { it.id },
             models = _state.value.models,
             commands = _state.value.commands,
             thinkingLevels = _state.value.thinkingLevels,
             sessions = _state.value.sessions,
+            editorPrefill = "",
         )
 
         viewModelScope.launch(Dispatchers.IO) {
@@ -825,8 +823,18 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 val gateway = ensureClient(config)
                 val info = gateway.session(sessionId)
                 activeCwd = info.cwd.takeIf { it.isNotBlank() }
-                _state.update {
-                    it.copy(sessionName = SessionTitle.display(info.name, info.created))
+                val openedName = SessionTitle.display(info.name, info.created)
+                _state.update { state ->
+                    state.copy(
+                        sessionName = openedName,
+                        openSessions = state.openSessions.map {
+                            if (it.id == sessionId) {
+                                it.copy(name = openedName, created = info.created)
+                            } else {
+                                it
+                            }
+                        },
+                    )
                 }
                 attach(gateway, sessionId)
             }.onFailure { error ->
@@ -834,6 +842,25 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     it.copy(error = error.message ?: "Could not open the session.")
                 }
             }
+        }
+    }
+
+    /** Close a tab only; the gateway record and its transcript stay. */
+    fun closeTab(sessionId: String) {
+        val state = _state.value
+        val tabs = state.openSessions.filterNot { it.id == sessionId }
+        val isCurrent = state.sessionId == sessionId ||
+            (state.sessionId == null && sessionId == DRAFT_ID)
+        if (!isCurrent) {
+            _state.update { it.copy(openSessions = tabs) }
+            return
+        }
+        val next = tabs.lastOrNull { !it.draft }
+        if (next != null) {
+            _state.update { it.copy(openSessions = tabs) }
+            switchSession(next.id)
+        } else {
+            newSession()
         }
     }
 
@@ -932,12 +959,16 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { gateway.deleteSession(sessionId) }
                 .onSuccess {
+                    val tabs = _state.value.openSessions.filterNot { it.id == sessionId }
                     if (GatewaySessionStore.sessionId == sessionId) {
                         streamJob?.cancel()
                         streamJob = null
                         clearScreenQuery()
                         GatewaySessionStore.reset()
-                        _state.value = AssistantUiState()
+                        _state.update { it.copy(openSessions = tabs) }
+                        newSession()
+                    } else {
+                        _state.update { it.copy(openSessions = tabs) }
                     }
                     settings.clearDraft(sessionId)
                     runCatching { gateway.sessions() }.onSuccess { sessions ->
@@ -968,6 +999,16 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                                 SessionTitle.display(updated.name, updated.created)
                             } else {
                                 state.sessionName
+                            },
+                            openSessions = state.openSessions.map {
+                                if (it.id == updated.id) {
+                                    it.copy(
+                                        name = SessionTitle.display(updated.name, updated.created),
+                                        created = updated.created,
+                                    )
+                                } else {
+                                    it
+                                }
                             },
                         )
                     }
@@ -1174,7 +1215,15 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         GatewaySessionStore.lastEventId = null
         GatewaySessionStore.fingerprint = config.fingerprint
         activeCwd = session.cwd.takeIf { it.isNotBlank() }
-        _state.update { it.copy(sessionId = session.id) }
+        val name = SessionTitle.display(session.name, session.created)
+        _state.update { state ->
+            state.copy(
+                sessionId = session.id,
+                sessionName = name,
+                openSessions = (state.openSessions.filterNot { it.draft } +
+                    OpenSession(session.id, name, session.created)).distinctBy { it.id },
+            )
+        }
         return session
     }
 
@@ -1232,6 +1281,18 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private suspend fun attach(gateway: GatewayClient, sessionId: String) = coroutineScope {
+        _state.update { state ->
+            if (state.openSessions.any { it.id == sessionId }) {
+                state
+            } else {
+                state.copy(
+                    openSessions = state.openSessions + OpenSession(
+                        id = sessionId,
+                        name = state.sessionName ?: "SESSION",
+                    ),
+                )
+            }
+        }
         // Gateway state and the transcript are independent. Fetch them together so opening a
         // session costs one round trip instead of two.
         val stateDeferred = async(Dispatchers.IO) { runCatching { gateway.state(sessionId) } }
@@ -1939,3 +2000,6 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
 /** Used when the gateway predates the thinking-level endpoint; Pi still validates the chosen level. */
 private val FALLBACK_THINKING_LEVELS = listOf("off", "minimal", "low", "medium", "high")
+
+/** A session that has not been sent yet; no gateway record exists until the first prompt. */
+private const val DRAFT_ID = "draft"

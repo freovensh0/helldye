@@ -10,6 +10,14 @@ import dev.scdeal.helldye.gateway.GatewayStats
 
 enum class ChatRole { User, Assistant, Tool, Error }
 
+/** A session tab the operator has opened; closing a tab does not remove the gateway record. */
+data class OpenSession(
+    val id: String,
+    val name: String,
+    val created: Long = 0,
+    val draft: Boolean = false,
+)
+
 data class ChatMessage(
     val id: String,
     val role: ChatRole,
@@ -65,6 +73,8 @@ data class AssistantUiState(
     val error: String? = null,
     val sessionId: String? = null,
     val sessionName: String? = null,
+    /** Tabs the operator opened in this process. */
+    val openSessions: List<OpenSession> = emptyList(),
     val models: List<GatewayModel> = emptyList(),
     val commands: List<GatewayCommand> = emptyList(),
     val currentModel: GatewayModel? = null,
