@@ -74,6 +74,8 @@ data class GatewayState(
     val allowEdits: Boolean = false,
     val lastEventId: String? = null,
     val epoch: String? = null,
+    /** Last cached usage; present for stopped sessions so the composer renders without Pi. */
+    val stats: GatewayStats? = null,
 )
 
 data class GatewayDiffFile(
@@ -361,11 +363,14 @@ class GatewayClient(private val config: GatewayConfig) {
             allowEdits = response.optBoolean("allowEdits", false),
             lastEventId = response.optString("lastEventId").takeIf { it.isNotBlank() },
             epoch = response.optString("epoch").takeIf { it.isNotBlank() },
+            stats = response.optJSONObject("stats")?.let(::parseStats),
         )
     }
 
-    fun stats(sessionId: String): GatewayStats {
-        val response = request("GET", "/sessions/$sessionId/stats")
+    fun stats(sessionId: String): GatewayStats =
+        parseStats(request("GET", "/sessions/$sessionId/stats"))
+
+    private fun parseStats(response: JSONObject): GatewayStats {
         val tokens = response.optJSONObject("tokens") ?: JSONObject()
         val context = response.optJSONObject("contextUsage") ?: JSONObject()
         return GatewayStats(
@@ -512,22 +517,29 @@ class GatewayClient(private val config: GatewayConfig) {
 
     private fun requestText(method: String, path: String, body: JSONObject? = null): String {
         val connection = openConnection(path, method)
-        if (body != null) {
-            connection.doOutput = true
-            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            connection.outputStream.use { output ->
-                output.write(body.toString().toByteArray(Charsets.UTF_8))
+        try {
+            if (body != null) {
+                connection.doOutput = true
+                connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                connection.outputStream.use { output ->
+                    output.write(body.toString().toByteArray(Charsets.UTF_8))
+                }
             }
-        }
 
-        val code = connection.responseCode
-        val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-        val text = stream?.reader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-        connection.disconnect()
-        if (code !in 200..299) {
-            throw GatewayException("HTTP $code: ${text.take(300)}")
+            val code = connection.responseCode
+            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+            val text = stream?.reader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            if (code !in 200..299) {
+                throw GatewayException("HTTP $code: ${text.take(300)}")
+            }
+            // Do not disconnect a successful exchange: closing the body returns the socket to the
+            // connection pool. Every disconnect here would pay a new TCP/TLS handshake per call, and
+            // opening a session makes several.
+            return text
+        } catch (error: Exception) {
+            connection.disconnect()
+            throw error
         }
-        return text
     }
 
     private fun openConnection(path: String, method: String): HttpURLConnection {

@@ -136,12 +136,13 @@ Read paths never start Pi:
   messages, total, hasMore, eventId, epoch}` without spawning Pi. If no file is found the list is empty
   and `source` is `none`.
 - `/state` on a stopped session returns `{started:false, busy:false, status:"stopped",
-  lastEventId, epoch}`.
+  lastEventId, epoch}` plus the last-known `model`, `thinkingLevel`, and `stats`.
 - `/events` on a stopped session emits one `not_started` SSE event and closes.
 
-`models`, `commands`, `stats`, `thinking`, `abort`, `compact`, and `extension_ui_response` still call
+`models`, `commands`, `thinking`, `abort`, `compact`, and `extension_ui_response` still call
 `ensure_started` because they need a live Pi. The app opens the event stream only after a prompt or an
-explicit resume.
+explicit resume. `/stats` also needs a live child, but it caches its payload and `/state` serves that
+cache after the child stops.
 
 An idle Pi child is stopped after `HELLDYE_IDLE_SECS` (default 1800, `0` disables) without a busy turn
 and without SSE subscribers. The session record is kept; the next prompt starts Pi again.
@@ -187,6 +188,8 @@ and without SSE subscribers. The session record is kept; the next prompt starts 
 - `eventId` is the per-session event id at the moment Pi answered. Open the event stream with
   `Last-Event-ID: 42` to receive events after the transcript snapshot.
 - `started:false` means Pi is stopped; the gateway never spawns it for this route.
+- The page is shaped for the phone: `toolResult` text is clipped to 16,000 characters and base64
+  image data is omitted. Pi keeps the full transcript on the host; `/export` still returns all of it.
 
 ### 2.5.1 Host import
 
@@ -375,7 +378,7 @@ screen-attachment feature needs an explicit retention decision first.
 - The gateway takes an advisory lock for its state directory (`gateway.lock`, a Unix socket next to
   `sessions.json`) and refuses to start while another live gateway owns it. A stale socket from a dead
   process is replaced after a failed connect.
-- `/state` serves the last-known model and thinking level for a stopped session from
+- `/state` serves the last-known model, thinking level, and usage for a stopped session from
   `sessions.json`, so the composer is truthful without spawning Pi.
 - The gateway is the only writer to a live Pi session. It spawns one child per session with
   `--session-id` and owns its stdin and stdout.

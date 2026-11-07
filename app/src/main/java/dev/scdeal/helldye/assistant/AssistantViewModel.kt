@@ -3,6 +3,7 @@ package dev.scdeal.helldye.assistant
 import android.app.Application
 import android.net.ConnectivityManager
 import android.net.Network
+import android.os.SystemClock
 import android.speech.tts.TextToSpeech
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -14,6 +15,7 @@ import dev.scdeal.helldye.gateway.GatewayImage
 import dev.scdeal.helldye.gateway.GatewayModel
 import dev.scdeal.helldye.gateway.GatewaySession
 import dev.scdeal.helldye.gateway.GatewaySessionStore
+import dev.scdeal.helldye.gateway.GatewayState
 import dev.scdeal.helldye.gateway.SettingsStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -21,6 +23,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -60,6 +63,12 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     private var activeAssistantId: String? = null
     private val toolMessages = mutableMapOf<String, String>()
     private val pendingUserEchoes = ConcurrentLinkedQueue<String>()
+    // Pi emits one delta per token. Appending each into a new immutable list re-parses markdown and
+    // scrolls the list per token, so deltas are batched into one frame-sized update.
+    private val deltaLock = Any()
+    private val assistantDelta = StringBuilder()
+    private val thinkingDelta = StringBuilder()
+    private var lastDeltaFlush = 0L
     private var olderCursor: Int? = null
     private var draftJob: Job? = null
     private var tts: TextToSpeech? = null
@@ -701,16 +710,24 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         clearScreenQuery()
         streamJob?.cancel()
         streamJob = null
+        clearDeltas()
         capabilitiesJob?.cancel()
         capabilitiesJob = null
         capabilitiesSessionId = null
         GatewaySessionStore.reset()
+        GatewaySessionStore.fingerprint = config.fingerprint
         client = null
         toolMessages.clear()
         pendingUserEchoes.clear()
         AssistantDraftStore.clear()
-        // Clear synchronously so the tap responds before the gateway round trip.
-        _state.value = AssistantUiState()
+        // Clear synchronously so the tap responds before the gateway round trip. Model and command
+        // lists are host-wide, so keep them until the picker refreshes them.
+        val previous = _state.value
+        _state.value = AssistantUiState(
+            models = previous.models,
+            commands = previous.commands,
+            thinkingLevels = previous.thinkingLevels,
+        )
 
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
@@ -766,6 +783,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         clearScreenQuery()
         streamJob?.cancel()
         streamJob = null
+        clearDeltas()
         capabilitiesJob?.cancel()
         capabilitiesJob = null
         capabilitiesSessionId = null
@@ -778,7 +796,12 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         toolMessages.clear()
         pendingUserEchoes.clear()
         AssistantDraftStore.clear()
-        _state.value = AssistantUiState(sessionId = sessionId)
+        _state.value = AssistantUiState(
+            sessionId = sessionId,
+            models = _state.value.models,
+            commands = _state.value.commands,
+            thinkingLevels = _state.value.thinkingLevels,
+        )
 
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
@@ -971,6 +994,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     override fun onCleared() {
         streamJob?.cancel()
         streamJob = null
+        clearDeltas()
         screenJob?.cancel()
         screenJob = null
         screenCollectorJob?.cancel()
@@ -992,6 +1016,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         sessionId: String,
         announce: Boolean,
         start: Boolean = false,
+        snapshot: GatewayState? = null,
     ) {
         if (!announce && capabilitiesSessionId == sessionId) return
         capabilitiesSessionId = sessionId
@@ -1000,53 +1025,72 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         capabilitiesJob = viewModelScope.launch(Dispatchers.IO) {
             if (capabilitiesRun != run) return@launch
             _state.update { it.copy(capabilitiesLoading = true) }
-            // Read gateway state first; every capability route below needs a live Pi child.
-            val snapshot = runCatching { gateway.state(sessionId) }.getOrNull()
+            // Read gateway state first; every capability route below needs a live Pi child. Attach
+            // already has this snapshot, so opening a session does not fetch it twice.
+            val current = snapshot ?: runCatching { gateway.state(sessionId) }.getOrNull()
             if (capabilitiesRun != run || GatewaySessionStore.sessionId != sessionId) return@launch
-            if (snapshot != null) {
-                GatewaySessionStore.epoch = snapshot.epoch ?: GatewaySessionStore.epoch
+            if (current != null) {
+                GatewaySessionStore.epoch = current.epoch ?: GatewaySessionStore.epoch
                 _state.update { state ->
                     state.copy(
-                        currentModel = snapshot.model ?: state.currentModel,
-                        thinkingLevel = snapshot.thinkingLevel ?: state.thinkingLevel,
-                        streaming = state.streaming || snapshot.busy || snapshot.stopping,
-                        stopping = snapshot.stopping,
-                        allowEdits = snapshot.allowEdits,
+                        currentModel = current.model ?: state.currentModel,
+                        thinkingLevel = current.thinkingLevel ?: state.thinkingLevel,
+                        streaming = state.streaming || current.busy || current.stopping,
+                        stopping = current.stopping,
+                        allowEdits = current.allowEdits,
+                        // Cached stats arrive with /state, so a stopped session still shows its
+                        // model, thinking, context usage, and limit.
+                        stats = current.stats ?: state.stats,
                     )
                 }
             }
-            if (snapshot?.started != true && !start) {
+            if (current?.started != true && !start) {
                 // Viewing a stopped session must not spawn Pi. A later prompt or picker retries.
                 capabilitiesSessionId = null
                 _state.update { it.copy(capabilitiesLoading = false) }
                 return@launch
             }
-            val models = runCatching { gateway.models(sessionId) }
-            val commands = runCatching { gateway.commands(sessionId) }
-            val stats = runCatching { gateway.stats(sessionId) }
-            val levels = runCatching { gateway.thinkingLevels(sessionId) }
+            // These routes each need a live Pi; run them together so opening a session costs one
+            // round trip instead of four. Model and command lists are host-wide and rarely change,
+            // so a populated list is reused until the picker is opened explicitly.
+            val models = if (announce || _state.value.models.isEmpty()) {
+                async { runCatching { gateway.models(sessionId) } }
+            } else {
+                null
+            }
+            val commands = if (announce || _state.value.commands.isEmpty()) {
+                async { runCatching { gateway.commands(sessionId) } }
+            } else {
+                null
+            }
+            val stats = async { runCatching { gateway.stats(sessionId) } }
+            val levels = async { runCatching { gateway.thinkingLevels(sessionId) } }
+            val loadedModels = models?.await()
+            val loadedCommands = commands?.await()
+            val loadedStats = stats.await()
+            val loadedLevels = levels.await()
             // Asking for models starts a stopped Pi. Read its state again so the picker marks the
             // active model instead of showing every row as inactive.
-            val current = if (start && snapshot?.started != true) {
+            val after = if (start && current?.started != true) {
                 runCatching { gateway.state(sessionId) }.getOrNull()
             } else {
-                snapshot
+                current
             }
             if (capabilitiesRun != run || GatewaySessionStore.sessionId != sessionId) return@launch
-            if (models.isFailure) capabilitiesSessionId = null
+            if (loadedModels?.isFailure == true) capabilitiesSessionId = null
             _state.update { state ->
                 state.copy(
-                    models = models.getOrElse { state.models },
-                    commands = commands.getOrElse { state.commands },
-                    currentModel = current?.model ?: state.currentModel,
-                    thinkingLevel = current?.thinkingLevel ?: state.thinkingLevel,
-                    allowEdits = current?.allowEdits ?: state.allowEdits,
-                    thinkingLevels = levels.getOrElse { state.thinkingLevels }
+                    models = loadedModels?.getOrElse { state.models } ?: state.models,
+                    commands = loadedCommands?.getOrElse { state.commands } ?: state.commands,
+                    currentModel = after?.model ?: state.currentModel,
+                    thinkingLevel = after?.thinkingLevel ?: state.thinkingLevel,
+                    allowEdits = after?.allowEdits ?: state.allowEdits,
+                    thinkingLevels = loadedLevels.getOrElse { state.thinkingLevels }
                         .ifEmpty { FALLBACK_THINKING_LEVELS },
-                    stats = stats.getOrElse { state.stats },
+                    stats = loadedStats.getOrElse { state.stats },
                     capabilitiesLoading = false,
-                    error = if (announce && models.isFailure) {
-                        models.exceptionOrNull()?.message ?: "Could not load models."
+                    error = if (announce && loadedModels?.isFailure == true) {
+                        loadedModels?.exceptionOrNull()?.message ?: "Could not load models."
                     } else {
                         state.error
                     },
@@ -1076,6 +1120,15 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             pendingUserEchoes.clear()
             capabilitiesSessionId = null
             GatewaySessionStore.reset()
+            _state.update {
+                it.copy(
+                    models = emptyList(),
+                    commands = emptyList(),
+                    currentModel = null,
+                    thinkingLevel = null,
+                    stats = null,
+                )
+            }
         }
         return client ?: GatewayClient(config).also {
             client = it
@@ -1153,10 +1206,14 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    private fun attach(gateway: GatewayClient, sessionId: String) {
+    private suspend fun attach(gateway: GatewayClient, sessionId: String) = coroutineScope {
+        // Gateway state and the transcript are independent. Fetch them together so opening a
+        // session costs one round trip instead of two.
+        val stateDeferred = async(Dispatchers.IO) { runCatching { gateway.state(sessionId) } }
+        val transcriptDeferred = async(Dispatchers.IO) { runCatching { gateway.messages(sessionId) } }
+        val snapshot = stateDeferred.await().getOrNull()
+        if (GatewaySessionStore.sessionId != sessionId) return@coroutineScope
         // Gateway state tells us whether Pi is alive and busy without starting it.
-        val snapshot = runCatching { gateway.state(sessionId) }.getOrNull()
-        if (GatewaySessionStore.sessionId != sessionId) return
         if (snapshot != null) {
             GatewaySessionStore.lastEventId = GatewaySessionStore.reconcileCursor(
                 storedEpoch = GatewaySessionStore.epoch,
@@ -1172,10 +1229,13 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             }
         }
+        // Capabilities (and cached usage for a stopped session) load while the transcript is still
+        // in flight instead of adding another round trip after it.
+        refreshCapabilities(gateway, sessionId, announce = false, snapshot = snapshot)
         // The transcript is authoritative; the event ring is only a live tail and can be cleared
         // when Pi restarts. Always restore first, then resume the stream after that snapshot.
-        val transcript = runCatching { gateway.messages(sessionId) }.getOrNull()
-        if (GatewaySessionStore.sessionId != sessionId) return
+        val transcript = transcriptDeferred.await().getOrNull()
+        if (GatewaySessionStore.sessionId != sessionId) return@coroutineScope
         if (transcript != null) {
             // A prompt sent while the transcript loaded already owns the conversation.
             val restored = _state.value.messages.isEmpty()
@@ -1200,7 +1260,6 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         } else if (snapshot?.started == true) {
             startStream(gateway, sessionId)
         }
-        refreshCapabilities(gateway, sessionId, announce = false)
         refreshDiffSummary()
     }
 
@@ -1231,6 +1290,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun restoreMessages(messages: JSONArray) {
+        clearDeltas()
         val restored = SessionTranscript.restore(messages)
         toolMessages.clear()
         toolMessages.putAll(restored.toolMessageIds)
@@ -1355,6 +1415,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             "resync" -> reloadAfterResync()
             "agent_start" -> _state.update { it.copy(streaming = true) }
             "agent_settled" -> {
+                flushDeltas()
                 activeAssistantId = null
                 pendingUserEchoes.clear()
                 settings.clearPendingSubmit()
@@ -1374,6 +1435,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                         }
                     }
                     "assistant" -> {
+                        flushDeltas()
                         val id = message.optString("id").ifBlank { UUID.randomUUID().toString() }
                         activeAssistantId = id
                         _state.update {
@@ -1400,6 +1462,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             "message_end" -> {
                 val message = payload.optJSONObject("message") ?: return
                 if (message.optString("role") == "assistant") {
+                    flushDeltas()
                     val id = activeAssistantId
                     if (id != null) {
                         finalizeAssistant(
@@ -1508,6 +1571,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 }
             }
             "gateway_exit" -> {
+                flushDeltas()
                 activeAssistantId = null
                 pendingUserEchoes.clear()
                 _state.update {
@@ -1523,9 +1587,10 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     private fun handleExtensionRequest(payload: JSONObject) {
         val id = payload.optString("id").ifBlank { return }
-        if (!handledExtensionIds.add(id)) return
         val timeout = payload.optLong("timeout").takeIf { it > 0 }
         when (payload.optString("method")) {
+            // Fire-and-forget updates are idempotent; replaying them on reconnect must not be
+            // deduplicated, or a reused status id freezes the bar.
             "notify" -> {
                 val message = ExtensionText.clean(payload.optString("message")).ifBlank { return }
                 val tone = when (payload.optString("notifyType")) {
@@ -1573,6 +1638,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 if (text.isNotBlank()) _state.update { it.copy(editorPrefill = text) }
             }
             "select" -> {
+                if (!handledExtensionIds.add(id)) return
                 val options = payload.optJSONArray("options")?.let { array ->
                     buildList {
                         for (index in 0 until array.length()) {
@@ -1589,30 +1655,39 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     ),
                 )
             }
-            "confirm" -> showExtensionDialog(
-                ExtensionDialog.Confirm(
-                    id = id,
-                    title = ExtensionText.clean(payload.optString("title")),
-                    message = ExtensionText.clean(payload.optString("message")),
-                    timeoutMs = timeout,
-                ),
-            )
-            "input" -> showExtensionDialog(
-                ExtensionDialog.Input(
-                    id = id,
-                    title = ExtensionText.clean(payload.optString("title")),
-                    placeholder = ExtensionText.clean(payload.optString("placeholder")),
-                    timeoutMs = timeout,
-                ),
-            )
-            "editor" -> showExtensionDialog(
-                ExtensionDialog.Editor(
-                    id = id,
-                    title = ExtensionText.clean(payload.optString("title")),
-                    prefill = payload.optString("prefill"),
-                    timeoutMs = timeout,
-                ),
-            )
+            "confirm" -> {
+                if (!handledExtensionIds.add(id)) return
+                showExtensionDialog(
+                    ExtensionDialog.Confirm(
+                        id = id,
+                        title = ExtensionText.clean(payload.optString("title")),
+                        message = ExtensionText.clean(payload.optString("message")),
+                        timeoutMs = timeout,
+                    ),
+                )
+            }
+            "input" -> {
+                if (!handledExtensionIds.add(id)) return
+                showExtensionDialog(
+                    ExtensionDialog.Input(
+                        id = id,
+                        title = ExtensionText.clean(payload.optString("title")),
+                        placeholder = ExtensionText.clean(payload.optString("placeholder")),
+                        timeoutMs = timeout,
+                    ),
+                )
+            }
+            "editor" -> {
+                if (!handledExtensionIds.add(id)) return
+                showExtensionDialog(
+                    ExtensionDialog.Editor(
+                        id = id,
+                        title = ExtensionText.clean(payload.optString("title")),
+                        prefill = payload.optString("prefill"),
+                        timeoutMs = timeout,
+                    ),
+                )
+            }
         }
     }
 
@@ -1629,31 +1704,67 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun appendAssistant(delta: String) {
+        queueDelta(delta, thinking = false)
+    }
+
+    private fun appendThinking(delta: String) {
+        queueDelta(delta, thinking = true)
+    }
+
+    private fun queueDelta(delta: String, thinking: Boolean) {
         if (delta.isEmpty()) return
+        synchronized(deltaLock) {
+            if (thinking) thinkingDelta.append(delta) else assistantDelta.append(delta)
+        }
+        // Stay on the stream coroutine: applying the batch from a timer job would race with the
+        // message_start/message_end handlers that own the active assistant id.
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastDeltaFlush < 60) return
+        lastDeltaFlush = now
+        applyDeltas()
+    }
+
+    /** Apply buffered deltas now; callers that replace or finish a message must not lose the tail. */
+    private fun flushDeltas() {
+        lastDeltaFlush = 0
+        applyDeltas()
+    }
+
+    private fun applyDeltas() {
+        val text: String
+        val thinking: String
+        synchronized(deltaLock) {
+            text = assistantDelta.toString()
+            thinking = thinkingDelta.toString()
+            assistantDelta.setLength(0)
+            thinkingDelta.setLength(0)
+        }
+        if (text.isEmpty() && thinking.isEmpty()) return
         val id = ensureAssistant()
         _state.update { state ->
             state.copy(
                 messages = state.messages.map {
-                    if (it.id == id) it.copy(text = it.text + delta) else it
+                    if (it.id == id) {
+                        it.copy(text = it.text + text, thinking = it.thinking + thinking)
+                    } else {
+                        it
+                    }
                 },
             )
         }
     }
 
-    private fun appendThinking(delta: String) {
-        if (delta.isEmpty()) return
-        val id = ensureAssistant()
-        _state.update { state ->
-            state.copy(
-                messages = state.messages.map {
-                    if (it.id == id) it.copy(thinking = it.thinking + delta) else it
-                },
-            )
+    private fun clearDeltas() {
+        lastDeltaFlush = 0
+        synchronized(deltaLock) {
+            assistantDelta.setLength(0)
+            thinkingDelta.setLength(0)
         }
     }
 
     private fun replaceAssistantText(content: String) {
         if (content.isEmpty()) return
+        synchronized(deltaLock) { assistantDelta.setLength(0) }
         val id = ensureAssistant()
         _state.update { state ->
             state.copy(
@@ -1666,6 +1777,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     private fun replaceThinking(content: String) {
         if (content.isEmpty()) return
+        synchronized(deltaLock) { thinkingDelta.setLength(0) }
         val id = ensureAssistant()
         _state.update { state ->
             state.copy(

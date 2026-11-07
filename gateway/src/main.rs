@@ -39,6 +39,7 @@ const EVENT_BUFFER: usize = 4_096;
 const BROADCAST_CAPACITY: usize = 2_048;
 const DEFAULT_PAGE: usize = 500;
 const MAX_PAGE: usize = 500;
+const TRANSCRIPT_TEXT_LIMIT: usize = 16_000;
 const MAX_IMAGES: usize = 4;
 const MAX_IMAGE_EDGE: u32 = 1_568;
 const MAX_IMAGE_BYTES: usize = 1_500_000;
@@ -122,6 +123,8 @@ struct Session {
     on_host: AtomicBool,
     last_model: Mutex<Option<CachedModel>>,
     last_thinking: Mutex<Option<String>>,
+    /// Last `get_session_stats` payload, so a stopped session still shows its context usage.
+    last_stats: Mutex<Option<Value>>,
     /// Per-session tool override. Only an explicit user action sets it; the default is read-only.
     tools_override: Mutex<Option<String>>,
     stdin: Mutex<Option<ChildStdin>>,
@@ -183,6 +186,9 @@ struct StoredSession {
     model: Option<CachedModel>,
     #[serde(default)]
     thinking: Option<String>,
+    /// Last context/token usage, kept for the composer while Pi is stopped.
+    #[serde(default)]
+    stats: Option<Value>,
     /// True when the record came from `HELLDYE_PI_SESSION_DIR`, not from this phone.
     #[serde(default)]
     on_host: bool,
@@ -1669,6 +1675,9 @@ async fn session_state(
             payload["thinkingLevel"] = json!(thinking);
         }
     }
+    if let Some(stats) = session.last_stats.lock().await.clone() {
+        payload["stats"] = stats;
+    }
     Ok(Json(payload))
 }
 
@@ -1718,7 +1727,26 @@ async fn session_stats(
         )
         .await
         .map_err(bad_gateway)?;
-    command_data(response).map(Json)
+    let data = command_data(response)?;
+    cache_stats(&session, &state, data.clone()).await;
+    Ok(Json(data))
+}
+
+/// Store the latest usage payload and persist only when it actually changed; the settled-turn
+/// refresh and the app's `/stats` read usually race with the same value.
+async fn cache_stats(session: &Arc<Session>, state: &AppState, data: Value) {
+    let changed = {
+        let mut cached = session.last_stats.lock().await;
+        if cached.as_ref() == Some(&data) {
+            false
+        } else {
+            *cached = Some(data);
+            true
+        }
+    };
+    if changed {
+        persist_sessions(state).await;
+    }
 }
 
 async fn session_thinking(
@@ -1921,6 +1949,7 @@ async fn session_messages(
         }
         let limit = page.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
         let (total, has_more) = paginate_messages(&mut data, limit, page.before);
+        clamp_transcript(&mut data);
         let source = if data["messages"].as_array().is_some_and(|m| !m.is_empty()) {
             "host"
         } else {
@@ -1943,6 +1972,7 @@ async fn session_messages(
     let mut data = command_data(response)?;
     let limit = page.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
     let (total, has_more) = paginate_messages(&mut data, limit, page.before);
+    clamp_transcript(&mut data);
     if let Some(object) = data.as_object_mut() {
         object.insert("started".to_string(), json!(true));
         object.insert("total".to_string(), json!(total));
@@ -1965,6 +1995,58 @@ fn paginate_messages(data: &mut Value, limit: usize, before: Option<usize>) -> (
     let page: Vec<Value> = messages[start..end].to_vec();
     *messages = page;
     (total, start > 0)
+}
+
+/// A page feeds the phone's text-only transcript. Bound the parts the app discards anyway, so a long
+/// session does not ship megabytes of tool output and base64 images over the network. The host
+/// transcript keeps the full data.
+fn clamp_transcript(data: &mut Value) {
+    let Some(messages) = data.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for message in messages {
+        let Some(object) = message.as_object_mut() else {
+            continue;
+        };
+        let tool_result = object.get("role").and_then(Value::as_str) == Some("toolResult");
+        let Some(content) = object.get_mut("content") else {
+            continue;
+        };
+        match content {
+            Value::String(text) if tool_result => clamp_text(text),
+            Value::Array(blocks) => {
+                for block in blocks {
+                    let Some(block) = block.as_object_mut() else {
+                        continue;
+                    };
+                    match block.get("type").and_then(Value::as_str) {
+                        Some("image") => {
+                            block.remove("data");
+                            if let Some(source) =
+                                block.get_mut("source").and_then(Value::as_object_mut)
+                            {
+                                source.remove("data");
+                            }
+                        }
+                        Some("text") if tool_result => {
+                            if let Some(Value::String(text)) = block.get_mut("text") {
+                                clamp_text(text);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn clamp_text(text: &mut String) {
+    if text.chars().count() <= TRANSCRIPT_TEXT_LIMIT {
+        return;
+    }
+    *text = text.chars().take(TRANSCRIPT_TEXT_LIMIT).collect::<String>() + "\n…";
 }
 
 async fn lookup_owned(state: &AppState, id: &str) -> Result<Arc<Session>, (StatusCode, String)> {
@@ -2056,6 +2138,7 @@ fn new_session(
         on_host: AtomicBool::new(false),
         last_model: Mutex::new(None),
         last_thinking: Mutex::new(None),
+        last_stats: Mutex::new(None),
         tools_override: Mutex::new(None),
         stdin: Mutex::new(None),
         start: Mutex::new(()),
@@ -2223,6 +2306,7 @@ async fn load_sessions(
                 session.on_host.store(item.on_host, Ordering::SeqCst);
                 *session.last_model.lock().await = item.model;
                 *session.last_thinking.lock().await = item.thinking;
+                *session.last_stats.lock().await = item.stats;
                 if item.allow_edits {
                     if let Ok(tools) = env::var("HELLDYE_ACTION_TOOLS") {
                         *session.tools_override.lock().await = Some(tools);
@@ -2254,6 +2338,7 @@ async fn persist_sessions(state: &AppState) {
             renamed: session.name_is_explicit.load(Ordering::SeqCst),
             model: session.last_model.lock().await.clone(),
             thinking: session.last_thinking.lock().await.clone(),
+            stats: session.last_stats.lock().await.clone(),
             on_host: session.on_host.load(Ordering::SeqCst),
             allow_edits: session.tools_override.lock().await.is_some(),
         });
@@ -2334,9 +2419,30 @@ async fn read_stdout(
             _ => {}
         }
         session.publish(generation, kind.clone(), line).await;
-        if session.ephemeral && kind == "agent_settled" {
-            // The subscriber already has the settled event; the one-shot record is done.
-            remove_ephemeral(&state, &session.id).await;
+        if kind == "agent_settled" {
+            if session.ephemeral {
+                // The subscriber already has the settled event; the one-shot record is done.
+                remove_ephemeral(&state, &session.id).await;
+            } else {
+                // Cache the final usage before the idle reaper can stop the child. The app reads it
+                // from `/state` while the session is stopped.
+                let refresh = session.clone();
+                let refresh_state = state.clone();
+                tokio::spawn(async move {
+                    let Ok(response) = refresh
+                        .request(
+                            json!({ "type": "get_session_stats" }),
+                            Duration::from_secs(10),
+                        )
+                        .await
+                    else {
+                        return;
+                    };
+                    if let Ok(data) = command_data(response) {
+                        cache_stats(&refresh, &refresh_state, data).await;
+                    }
+                });
+            }
         }
     }
 }
@@ -2609,12 +2715,12 @@ mod tests {
     #[cfg(unix)]
     use super::acquire_writer_lock;
     use super::{
-        CachedModel, ContextFile, ImageBody, PromptContext, constant_time_eq, decode_base64,
-        ensure_token_file_outside_workspaces, git_diff_limited, info_payload, jpeg_dimensions,
-        migrated_name, neutral_name, paginate_messages, parse_host_messages, parse_numstat,
-        parse_session_metadata, parse_worktrees, pi_command, png_dimensions, read_token_file,
-        redact_stderr_line, resolve_workspace, resync_event, scan_import_dir, should_reap,
-        valid_branch, validate_images, write_state_atomically,
+        CachedModel, ContextFile, ImageBody, PromptContext, clamp_transcript, constant_time_eq,
+        decode_base64, ensure_token_file_outside_workspaces, git_diff_limited, info_payload,
+        jpeg_dimensions, migrated_name, neutral_name, paginate_messages, parse_host_messages,
+        parse_numstat, parse_session_metadata, parse_worktrees, pi_command, png_dimensions,
+        read_token_file, redact_stderr_line, resolve_workspace, resync_event, scan_import_dir,
+        should_reap, valid_branch, validate_images, write_state_atomically,
     };
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
@@ -3447,6 +3553,39 @@ mod tests {
     }
 
     #[test]
+    fn transcript_page_clips_tool_output_and_drops_image_bytes() {
+        let huge = "x".repeat(20_000);
+        let mut data = serde_json::json!({
+            "messages": [
+                { "role": "toolResult", "content": [{ "type": "text", "text": huge }] },
+                { "role": "toolResult", "content": "y".repeat(20_000) },
+                { "role": "user", "content": [{
+                    "type": "image",
+                    "data": "AAAA",
+                    "mimeType": "image/jpeg"
+                }] },
+                { "role": "assistant", "content": [{ "type": "text", "text": "keep this" }] }
+            ]
+        });
+        clamp_transcript(&mut data);
+        let messages = data["messages"].as_array().unwrap();
+        assert_eq!(
+            messages[0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            super::TRANSCRIPT_TEXT_LIMIT + 2
+        );
+        assert_eq!(
+            messages[1]["content"].as_str().unwrap().chars().count(),
+            super::TRANSCRIPT_TEXT_LIMIT + 2
+        );
+        assert!(messages[2]["content"][0].get("data").is_none());
+        assert_eq!(messages[3]["content"][0]["text"], "keep this");
+    }
+
+    #[test]
     fn reaping_requires_idle_stopped_stream_and_no_subscribers() {
         assert!(should_reap(true, false, 0, 1_800, 1_800));
         assert!(!should_reap(false, false, 0, 9_999, 1_800));
@@ -3504,6 +3643,9 @@ mod tests {
             name: "Claude".into(),
         });
         *session.last_thinking.lock().await = Some("high".into());
+        *session.last_stats.lock().await = Some(serde_json::json!({
+            "contextUsage": { "tokens": 1000, "contextWindow": 200000, "percent": 1 }
+        }));
         let mut sessions = std::collections::HashMap::new();
         sessions.insert(session.id.clone(), session);
         let state = super::AppState {
@@ -3529,6 +3671,7 @@ mod tests {
         assert_eq!(value["epoch"], "epoch-a");
         assert_eq!(value["model"]["id"], "claude");
         assert_eq!(value["thinkingLevel"], "high");
+        assert_eq!(value["stats"]["contextUsage"]["percent"], 1);
         assert!(!marker.exists(), "reading state must not spawn Pi");
 
         let Json(messages) = super::session_messages(
